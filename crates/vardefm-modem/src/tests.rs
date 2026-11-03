@@ -129,7 +129,7 @@ fn threaded_decoding_matches_single_thread() {
     // A noisy link where some codewords fail: the result must not depend on the thread count.
     let params = OfdmParams::by_name("narrow").unwrap();
     let b = burst(6, 9, 11);
-    let cfg = FmChannelConfig { cnr_db: Some(17.0), seed: 5, ..FmChannelConfig::by_name("narrow").unwrap() };
+    let cfg = FmChannelConfig { cnr_db: Some(16.0), seed: 5, ..FmChannelConfig::by_name("narrow").unwrap() };
     let audio = transmit(&cfg, &Modem::new(params.clone(), 0.1).modulate(&b));
     let mut results = Vec::new();
     for threads in [1, 2, 4, 16] {
@@ -142,4 +142,96 @@ fn threaded_decoding_matches_single_thread() {
     let ok = results[0].iter().filter(|p| p.is_some()).count();
     assert!(ok > 0 && ok < 9, "want a mix of good and failed codewords, got {ok}/9");
     assert!(results.iter().all(|r| *r == results[0]));
+}
+
+/// Received audio of `b` through the simulator, and where its preamble B starts.
+fn received(m: &Modem, mode: &str, b: &Burst, cnr: f32) -> (Vec<f32>, usize) {
+    let cfg = FmChannelConfig { cnr_db: Some(cnr), ..FmChannelConfig::by_name(mode).unwrap() };
+    let audio = transmit(&cfg, &m.modulate(b));
+    let start = m.ofdm.detect(&audio, 0).expect("frame not detected");
+    (audio, start)
+}
+
+#[test]
+fn header_training_raises_snr() {
+    for mode in ["narrow", "wide"] {
+        let m = modem(mode);
+        let b = burst(4, 2, 21);
+        let (audio, start) = received(&m, mode, &b, 30.0);
+        let nsym = m.header_symbols() + 2 * m.symbols_per_codeword(4);
+        let plain = m.ofdm.demodulate(&audio, start, nsym).unwrap();
+        let known = m.header_carriers(&b.header);
+        let trained = m.ofdm.demodulate_known(&audio, start, nsym, &known).unwrap();
+        assert!(
+            trained.snr_db > plain.snr_db + 0.5,
+            "{mode}: SNR {:.1} dB with header training, {:.1} dB without",
+            trained.snr_db,
+            plain.snr_db
+        );
+        assert!(m.decode_payload(&b.header, &trained).iter().all(|p| p.is_some()), "{mode}");
+    }
+}
+
+#[test]
+fn survives_a_click() {
+    // An FM threshold click or a squelch pop wipes out one whole OFDM symbol. Its
+    // per-symbol noise scale must keep its LLRs from swamping the decoder.
+    let (mode, level, ncw) = ("narrow", 6, 4);
+    let m = modem(mode);
+    let b = burst(level, ncw, 31);
+    let (mut audio, start) = received(&m, mode, &b, 24.0);
+    let p = &m.ofdm.p;
+    let l = p.symbol_len();
+    let nsym = m.header_symbols() + ncw * m.symbols_per_codeword(level);
+    // Data symbol i, cyclic prefix included, starts at start + (i+1)*l - ncp.
+    let hit = m.header_symbols() + ncw * m.symbols_per_codeword(level) / 2;
+    let from = start + (hit + 1) * l - p.ncp;
+    let sig = &audio[start..start + nsym * l];
+    let rms = (sig.iter().map(|x| x * x).sum::<f32>() / sig.len() as f32).sqrt();
+    // Uniform noise in ±a has RMS a/sqrt(3): make it 3x the signal.
+    let a = 3.0 * rms * 3f32.sqrt();
+    let mut rng = Prng::new(77);
+    for x in &mut audio[from..from + l] {
+        *x = a * (rng.next_u32() as f32 / u32::MAX as f32 * 2.0 - 1.0);
+    }
+
+    let known = m.header_carriers(&b.header);
+    let mut frame = m.ofdm.demodulate_known(&audio, start, nsym, &known).unwrap();
+    let scale = frame.symbol_noise_scale.clone();
+    assert!(scale[hit] > 10.0, "scales {scale:?}");
+    assert!(scale.iter().enumerate().all(|(i, &s)| i == hit || s < scale[hit] / 10.0), "scales {scale:?}");
+    let ok = m.decode_payload(&b.header, &frame).iter().filter(|p| p.is_some()).count();
+    assert_eq!(ok, ncw);
+    // Without the scale the click symbol's LLRs are far too confident.
+    frame.symbol_noise_scale.iter_mut().for_each(|s| *s = 1.0);
+    let ok_flat = m.decode_payload(&b.header, &frame).iter().filter(|p| p.is_some()).count();
+    assert!(ok_flat < ncw, "{ok_flat} codewords decode even without the per-symbol scale");
+
+    // And the same through the streaming receiver.
+    let got = receive(&mut Receiver::new(m.clone()), &audio);
+    assert_eq!(got.len(), 1);
+    assert!(got[0].payload.iter().all(|p| p.is_some()));
+}
+
+#[test]
+fn header_only_burst_reports_the_same_snr() {
+    // Rate adaptation uses the SNR of every burst, acks included.
+    for (mode, cnr) in [("narrow", 15.0), ("wide", 22.0)] {
+        let m = modem(mode);
+        let mut snr = Vec::new();
+        for ncw in [0, 3] {
+            let mut sum = 0.0;
+            for seed in 1..=4 {
+                let b = burst(3, ncw, seed);
+                let cfg =
+                    FmChannelConfig { cnr_db: Some(cnr), seed: seed as u64, ..FmChannelConfig::by_name(mode).unwrap() };
+                let got = receive(&mut Receiver::new(m.clone()), &transmit(&cfg, &m.modulate(&b)));
+                assert_eq!(got.len(), 1, "{mode} ncw {ncw} seed {seed}");
+                sum += got[0].snr_db;
+            }
+            snr.push(sum / 4.0);
+        }
+        eprintln!("{mode}: header-only {:.2} dB, data {:.2} dB", snr[0], snr[1]);
+        assert!((snr[0] - snr[1]).abs() < 0.7, "{mode}: header-only {:.1} dB, data {:.1} dB", snr[0], snr[1]);
+    }
 }

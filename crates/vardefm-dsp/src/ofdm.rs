@@ -21,6 +21,10 @@ const DETECT_THRESHOLD: f64 = 0.3;
 /// Pilots are averaged over this many symbols either side.
 const TRACK_HALF_WINDOW: usize = 4;
 const MIN_PREAMBLE_CORR: f32 = 0.3;
+/// A symbol whose pilot noise exceeds this many times the typical level gets its own
+/// noise scale. Normal symbols almost never get there (the per-symbol estimate averages
+/// 18-24 real noise samples).
+const SCALE_THRESHOLD: f32 = 2.0;
 
 pub struct Ofdm {
     pub p: OfdmParams,
@@ -44,6 +48,10 @@ pub struct Frame {
     pub symbols: Vec<Vec<Complex32>>,
     /// Estimated noise variance after equalization, per data carrier.
     pub noise_var: Vec<f32>,
+    /// Noise scale per OFDM symbol (at least 1). The noise variance of symbol `i`,
+    /// data carrier `j` is `noise_var[j] * symbol_noise_scale[i]`; it is large for a
+    /// symbol hit by an FM click, a squelch pop or a short fade.
+    pub symbol_noise_scale: Vec<f32>,
     /// Average SNR per symbol (Es/N0) in dB.
     pub snr_db: f32,
     /// Sample index just past the end of the frame.
@@ -262,22 +270,47 @@ impl Ofdm {
 
     /// Demodulate `nsym` data symbols of a frame whose preamble B starts at `b_start`.
     pub fn demodulate(&self, rx: &[f32], b_start: usize, nsym: usize) -> Option<Frame> {
+        self.demodulate_known(rx, b_start, nsym, &[])
+    }
+
+    /// Like [`demodulate`](Self::demodulate), but the data-carrier values of the first
+    /// `known.len()` symbols are known (for example a header that has already been
+    /// decoded). Those symbols train the channel estimate together with preamble B.
+    pub fn demodulate_known(&self, rx: &[f32], b_start: usize, nsym: usize, known: &[Vec<Complex32>]) -> Option<Frame> {
         let n = self.p.nfft;
         let l = self.p.symbol_len() as isize;
         let nc = self.p.num_carriers;
-        let np = self.pilot_idx.len();
         // Centre the FFT window in the cyclic prefix. That leaves ncp/2 samples of
         // slack each way for sound-card clock drift without ever moving the window.
         let base = b_start as isize - (self.p.ncp / 2) as isize;
 
         let yb = self.carriers_at(rx, base)?;
-        let raw: Vec<Complex32> = (0..nc).map(|k| yb[k] / self.pre_b[k]).collect();
-        // Light smoothing across frequency (the audio channel response is smooth).
-        // Remove the linear phase from the timing offset first, or smoothing would
-        // average over a rotating phase.
-        let rot: Complex32 = (1..nc).map(|k| raw[k] * raw[k - 1].conj()).sum();
-        let slope = rot.arg();
-        let flat: Vec<Complex32> = (0..nc).map(|k| raw[k] * Complex32::from_polar(1.0, -slope * k as f32)).collect();
+        let ys: Vec<Vec<Complex32>> =
+            (0..nsym).map(|i| self.carriers_at(rx, base + (i as isize + 1) * l)).collect::<Option<_>>()?;
+
+        // Channel estimate: preamble B averaged with the known symbols. Clock drift moves
+        // the timing by at most a sample or so over the header; the pilot tracking below
+        // takes that out, so the symbols are simply averaged. (Removing each symbol's own
+        // phase slope instead costs up to 2 dB at low SNR: the slope estimate is noisy and
+        // its error grows across the band.)
+        let mut acc: Vec<Complex32> = (0..nc).map(|k| yb[k] / self.pre_b[k]).collect();
+        let nk = known.len().min(nsym);
+        for (i, d) in known[..nk].iter().enumerate() {
+            assert_eq!(d.len(), self.data_idx.len(), "wrong number of known symbols");
+            for (j, &k) in self.data_idx.iter().enumerate() {
+                acc[k] += ys[i][k] / d[j];
+            }
+            for (m, &k) in self.pilot_idx.iter().enumerate() {
+                acc[k] += ys[i][k] * self.pilot_value(i, m);
+            }
+        }
+        let ntrain = (nk + 1) as f32;
+        acc.iter_mut().for_each(|a| *a /= ntrain);
+        // Light [1 2 1]/4 smoothing across frequency (the audio channel response is
+        // smooth). It still pays with the header averaged in: dropping it costs about
+        // 0.5 dB in wide mode. Remove the linear phase from the timing offset first, or
+        // smoothing would average over a rotating phase.
+        let (slope, flat) = remove_slope(&acc);
         let hb: Vec<Complex32> = (0..nc)
             .map(|k| {
                 let lo = flat[k.saturating_sub(1)];
@@ -285,53 +318,54 @@ impl Ofdm {
                 (lo + flat[k] * 2.0 + hi) * 0.25 * Complex32::from_polar(1.0, slope * k as f32)
             })
             .collect();
+        // Noise the estimate adds to every equalized symbol, relative to one symbol's:
+        // the kernel passes 3/8 of the noise of the `ntrain` averaged symbols.
+        let est_noise = 0.375 / ntrain;
 
-        // Pass 1: FFT every symbol and compute pilot ratios against the preamble estimate.
-        let mut ys = Vec::with_capacity(nsym);
-        let mut cs: Vec<Vec<Complex32>> = Vec::with_capacity(nsym);
-        for i in 0..nsym {
-            let y = self.carriers_at(rx, base + (i as isize + 1) * l)?;
-            cs.push(self.pilot_idx.iter().enumerate().map(|(m, &k)| y[k] / (hb[k] * self.pilot_value(i, m))).collect());
-            ys.push(y);
-        }
+        // Pilot ratios against the channel estimate.
+        let cs: Vec<Vec<Complex32>> = ys
+            .iter()
+            .enumerate()
+            .map(|(i, y)| {
+                self.pilot_idx.iter().enumerate().map(|(m, &k)| y[k] / (hb[k] * self.pilot_value(i, m))).collect()
+            })
+            .collect();
 
-        // Pass 2: average each pilot over neighbouring symbols, interpolate between
-        // pilots, equalize. Each carrier only depends on nearby pilots, so noisy pilots
-        // at one end of the band do not corrupt carriers at the other end.
-        let mut pilot_err = vec![0f32; np];
-        let mut symbols = Vec::with_capacity(nsym);
-        for i in 0..nsym {
-            let lo = i.saturating_sub(TRACK_HALF_WINDOW);
-            let hi = (i + TRACK_HALF_WINDOW + 1).min(nsym);
-            let cnt = (hi - lo) as f32;
-            let avg: Vec<Complex32> =
-                (0..np).map(|m| cs[lo..hi].iter().map(|c| c[m]).sum::<Complex32>() / cnt).collect();
-            if cnt > 1.0 {
-                let bias = cnt / (cnt - 1.0);
-                for m in 0..np {
-                    pilot_err[m] += (cs[i][m] / avg[m] - 1.0).norm_sqr() * bias;
-                }
-            }
-            symbols.push(self.data_idx.iter().map(|&k| ys[i][k] / (hb[k] * self.interp_pilots(&avg, k))).collect());
-        }
+        // Average each pilot over neighbouring symbols, weighting each symbol by the
+        // inverse of its noise. The first pass (equal weights) finds symbols hit by an
+        // FM click or a fade; the second keeps them out of their neighbours' averages.
+        let (_, dev) = track_pilots(&cs, &vec![1.0; nsym]);
+        let (scale, _) = noise_model(&dev);
+        let (avg, dev) = track_pilots(&cs, &scale);
+        let (scale, pilot_var) = noise_model(&dev);
 
-        // Noise per data carrier, interpolated from the pilots. The preamble estimate
-        // adds its own noise (3/8 of one symbol's, after smoothing) on top.
-        let pilot_var: Vec<f32> = pilot_err.iter().map(|e| e / nsym.max(1) as f32 * 1.375).collect();
+        // Interpolate between pilots and equalize. Each carrier only depends on nearby
+        // pilots, so noisy pilots at one end of the band do not corrupt carriers at the
+        // other end.
+        let symbols: Vec<Vec<Complex32>> = (0..nsym)
+            .map(|i| self.data_idx.iter().map(|&k| ys[i][k] / (hb[k] * self.interp_pilots(&avg[i], k))).collect())
+            .collect();
+
+        // Noise per data carrier, interpolated from the pilots, plus the noise of the
+        // channel estimate.
         let noise_var: Vec<f32> = self
             .data_idx
             .iter()
             .map(|&k| {
                 let (m, t) = self.pilot_pos(k);
-                (pilot_var[m] * (1.0 - t) + pilot_var[m + 1] * t).max(1e-6)
+                ((pilot_var[m] * (1.0 - t) + pilot_var[m + 1] * t) * (1.0 + est_noise)).max(1e-6)
             })
             .collect();
+        // The reported SNR averages the noise over all symbols, click-hit ones included,
+        // as it did before there was a per-symbol scale.
         let mean_var = noise_var.iter().sum::<f32>() / noise_var.len() as f32;
+        let mean_scale = scale.iter().sum::<f32>() / nsym.max(1) as f32;
 
         Some(Frame {
             symbols,
             noise_var,
-            snr_db: -10.0 * mean_var.log10(),
+            symbol_noise_scale: scale,
+            snr_db: -10.0 * (mean_var * mean_scale.max(1.0)).log10(),
             end: (base + (nsym as isize + 1) * l + n as isize) as usize,
         })
     }
@@ -351,6 +385,76 @@ impl Ofdm {
         let dphi = (b * a.conj()).arg();
         Complex32::from_polar(mag, a.arg() + dphi * t)
     }
+}
+
+/// Split the linear phase (the timing offset) off a per-carrier channel estimate.
+/// Returns the slope in radians per carrier and the estimate without it.
+fn remove_slope(raw: &[Complex32]) -> (f32, Vec<Complex32>) {
+    let rot: Complex32 = raw.windows(2).map(|w| w[1] * w[0].conj()).sum();
+    let slope = rot.arg();
+    (slope, raw.iter().enumerate().map(|(k, &h)| h * Complex32::from_polar(1.0, -slope * k as f32)).collect())
+}
+
+/// Average each pilot over up to `TRACK_HALF_WINDOW` symbols either side, weighting
+/// symbol `i` by `1 / scale[i]`. Returns the averages and each pilot's squared
+/// deviation from its average, corrected for the pilot's own share of that average.
+fn track_pilots(cs: &[Vec<Complex32>], scale: &[f32]) -> (Vec<Vec<Complex32>>, Vec<Vec<f32>>) {
+    let nsym = cs.len();
+    let np = cs.first().map_or(0, |c| c.len());
+    let mut avgs = Vec::with_capacity(nsym);
+    let mut devs = Vec::with_capacity(nsym);
+    for i in 0..nsym {
+        let lo = i.saturating_sub(TRACK_HALF_WINDOW);
+        let hi = (i + TRACK_HALF_WINDOW + 1).min(nsym);
+        let wsum: f32 = scale[lo..hi].iter().map(|s| 1.0 / s).sum();
+        let avg: Vec<Complex32> =
+            (0..np).map(|m| (lo..hi).map(|j| cs[j][m] / scale[j]).sum::<Complex32>() / wsum).collect();
+        // With weights matched to the noise, the deviation's variance is the symbol's
+        // own noise times (1 - its share of the average).
+        let share = 1.0 / scale[i] / wsum;
+        let dev = if share < 0.999 {
+            let bias = 1.0 / (1.0 - share);
+            (0..np).map(|m| (cs[i][m] / avg[m] - 1.0).norm_sqr() * bias).collect()
+        } else {
+            vec![0.0; np]
+        };
+        avgs.push(avg);
+        devs.push(dev);
+    }
+    (avgs, devs)
+}
+
+/// Fit the pilot deviations to a separable noise model: variance = per-pilot variance
+/// × per-symbol scale. Returns (scale per symbol, at least 1; variance per pilot).
+///
+/// A symbol's scale is 1 unless its noise is more than `SCALE_THRESHOLD` times the
+/// typical level: with 9-12 pilots per symbol the estimate is noisy, and the point is
+/// to catch symbols hit by a click, not to fine-tune the rest. (Scaling every symbol by
+/// `max(1, e/mean)` cost a little at the 64QAM levels.)
+fn noise_model(dev: &[Vec<f32>]) -> (Vec<f32>, Vec<f32>) {
+    let nsym = dev.len();
+    let np = dev.first().map_or(0, |d| d.len());
+    let per_pilot = |scale: &[f32]| -> Vec<f32> {
+        (0..np).map(|m| dev.iter().zip(scale).map(|(d, s)| d[m] / s).sum::<f32>() / nsym.max(1) as f32).collect()
+    };
+    let ones = vec![1.0; nsym];
+    let var = per_pilot(&ones);
+    if nsym < 3 {
+        return (ones, var);
+    }
+    // Noise energy per symbol, each pilot relative to its own average.
+    let e: Vec<f32> =
+        dev.iter().map(|d| d.iter().zip(&var).map(|(x, v)| x / v.max(1e-12)).sum::<f32>() / np as f32).collect();
+    // Reference level: the mean over symbols not far above the median, so that the
+    // clicks themselves do not raise it.
+    let mut sorted = e.clone();
+    sorted.sort_by(f32::total_cmp);
+    let median = sorted[nsym / 2];
+    let (sum, cnt) = e.iter().filter(|&&x| x <= 3.0 * median).fold((0.0, 0), |(s, c), &x| (s + x, c + 1));
+    let reference = (sum / cnt.max(1) as f32).max(1e-12);
+    let scale: Vec<f32> = e.iter().map(|x| x / reference).map(|r| if r > SCALE_THRESHOLD { r } else { 1.0 }).collect();
+    let var = per_pilot(&scale);
+    (scale, var)
 }
 
 #[cfg(test)]

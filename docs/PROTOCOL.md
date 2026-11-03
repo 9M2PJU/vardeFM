@@ -64,8 +64,12 @@ The reference receiver:
 2. Confirms the frame by cross-correlating with preamble B.
 3. Places the FFT window mid cyclic prefix, which absorbs clock drift of ±ncp/2 samples
    over the frame.
-4. Estimates the channel from preamble B, smoothed across frequency.
+4. Estimates the channel from preamble B, smoothed across frequency, and decodes the
+   header with it. Once the header has decoded, it demodulates the frame again with the
+   header symbols (now known) averaged into the channel estimate.
 5. Tracks it with pilots averaged over ±4 symbols and interpolated in magnitude and phase.
+6. Estimates the noise per carrier and, from the pilots, a noise scale per symbol, so
+   that a symbol hit by an FM click or a squelch pop gets low-confidence LLRs.
 
 Because the window never moves, a frame should stay shorter than
 `ncp / 2 / (clock error)`. At 100 ppm that is 13 s (narrow) or 6.7 s (wide).

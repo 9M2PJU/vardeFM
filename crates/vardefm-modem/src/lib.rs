@@ -13,7 +13,7 @@ pub use header::{Header, Kind, FLAG_POLL};
 pub use receiver::{Receiver, RxBurst};
 pub use vardefm_dsp::OfdmParams;
 
-use vardefm_dsp::{Complex32, Modulation, Ofdm};
+use vardefm_dsp::{Complex32, Frame, Modulation, Ofdm};
 use vardefm_fec::{bytes_to_bits, crc, permutation, scramble_bits, Ldpc};
 
 /// Bits per payload codeword.
@@ -191,19 +191,30 @@ impl Modem {
         self.ofdm.modulate_with_leader(&symbols, self.txdelay)
     }
 
-    /// LLRs for every bit slot of `symbols`, using per-carrier noise variance.
-    fn llrs(m: Modulation, symbols: &[Vec<Complex32>], noise_var: &[f32]) -> Vec<f32> {
-        let mut out = Vec::with_capacity(symbols.len() * noise_var.len() * m.bits_per_symbol());
-        for sym in symbols {
-            for (y, &nv) in sym.iter().zip(noise_var) {
-                m.demap_llr(*y, nv, &mut out);
+    /// The header's data-carrier values, one Vec per OFDM symbol, as transmitted.
+    /// Once the header has decoded, the receiver uses them as channel training.
+    fn header_carriers(&self, h: &Header) -> Vec<Vec<Complex32>> {
+        let bpsk = Modulation::Bpsk;
+        let nd = self.ofdm.data_carriers();
+        self.header_bits(h).chunks(nd).map(|c| c.iter().map(|&b| bpsk.map(&[b])).collect()).collect()
+    }
+
+    /// LLRs for every bit slot of symbols `from..` of `f`. The noise variance of
+    /// symbol `i`, carrier `j` is `f.noise_var[j] * f.symbol_noise_scale[i]`.
+    fn llrs(m: Modulation, f: &Frame, from: usize) -> Vec<f32> {
+        let symbols = &f.symbols[from..];
+        let mut out = Vec::with_capacity(symbols.len() * f.noise_var.len() * m.bits_per_symbol());
+        for (sym, &scale) in symbols.iter().zip(&f.symbol_noise_scale[from..]) {
+            for (y, &nv) in sym.iter().zip(&f.noise_var) {
+                m.demap_llr(*y, nv * scale, &mut out);
             }
         }
         out
     }
 
-    fn decode_header(&self, symbols: &[Vec<Complex32>], noise_var: &[f32]) -> Option<Header> {
-        let slots = Self::llrs(Modulation::Bpsk, symbols, noise_var);
+    /// Decode the header from the first `header_symbols()` symbols of `f`.
+    fn decode_header(&self, f: &Frame) -> Option<Header> {
+        let slots = Self::llrs(Modulation::Bpsk, f, 0);
         let llr: Vec<f32> = (0..HDR_CODE_BITS).map(|j| slots[self.hdr_perm[j]]).collect();
         let mut bits = self.hdr_code.decode(&llr, DECODE_ITERS)?;
         for (b, s) in bits.iter_mut().zip(scramble_bits(SEED_HDR_SCRAMBLE, HDR_INFO_BITS)) {
@@ -212,10 +223,11 @@ impl Modem {
         Header::unpack(&vardefm_fec::bits_to_bytes(&bits))
     }
 
-    fn decode_payload(&self, h: &Header, symbols: &[Vec<Complex32>], noise_var: &[f32]) -> Vec<Option<Vec<u8>>> {
+    /// Decode the payload codewords of `f` (a whole frame, header symbols included).
+    fn decode_payload(&self, h: &Header, f: &Frame) -> Vec<Option<Vec<u8>>> {
         let level = LEVELS[h.level as usize];
         let code = &self.codes[h.level as usize];
-        let slots = Self::llrs(level.modulation, symbols, noise_var);
+        let slots = Self::llrs(level.modulation, f, self.hdr_syms);
         let total = h.ncw as usize * CW_BITS;
         let perm = permutation(SEED_INTERLEAVE, total);
         let decode = |j: usize| -> Option<Vec<u8>> {

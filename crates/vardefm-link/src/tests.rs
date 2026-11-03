@@ -274,21 +274,50 @@ fn idle_link_is_kept_alive_then_dropped_when_peer_dies() {
 fn rate_choice_accounts_for_drive_per_level() {
     for params in [OfdmParams::narrow(), OfdmParams::wide()] {
         let modem = Modem::new(params, 0.1);
+        let name = modem.ofdm.p.name;
         let top = LEVELS.len() as u8 - 1;
         for l in 0..=top {
             // Just above the threshold, measured on a burst at that level.
-            let at = SNR_THRESHOLDS_DB[l as usize] + SNR_MARGIN_DB + 0.01;
-            assert!(level_by_snr(&modem, at, l) >= l, "{} level {l}", modem.ofdm.p.name);
-            // The same channel measured on a louder level-0 burst.
-            assert!(level_by_snr(&modem, at + modem.level_gain_db(l, 0), 0) >= l);
+            let at = SNR_THRESHOLDS_DB[l as usize] + SNR_MARGIN_DB + 0.05;
+            assert!(level_by_snr(&modem, at, l) >= l, "{name} level {l}");
+            // The same channel measured on a louder level-0 burst (the model is invertible
+            // below the ceilings).
+            let at0 = modem.predict_snr_db(at, l, 0);
+            assert!(level_by_snr(&modem, at0, 0) >= l, "{name} level {l}: {at:.2} dB -> {at0:.2} dB at level 0");
+            // A level never predicts above its own ceiling, nor above the measurement
+            // plus the drive difference.
+            for to in 0..=top {
+                let pred = modem.predict_snr_db(at, l, to);
+                assert!(pred <= modem.ofdm.p.level_snr_ceiling_db[to as usize] + 0.01);
+                assert!(pred <= at + modem.level_gain_db(l, to).max(0.0) + 0.01, "{name} {l}->{to}: {pred}");
+            }
         }
-        // A loud burst's SNR overstates what a softer, faster level would get.
+        // Well below the ceilings, a loud burst's SNR overstates what a softer, faster
+        // level would get by about the drive difference.
         let gain = modem.level_gain_db(top, 0);
         assert!(gain > 0.0);
-        let snr = SNR_THRESHOLDS_DB[top as usize] + SNR_MARGIN_DB + gain / 2.0;
-        assert!(level_by_snr(&modem, snr, 0) < top);
-        assert_eq!(level_by_snr(&modem, snr, top), top);
+        let pred = modem.predict_snr_db(5.0, 0, top);
+        assert!((pred - (5.0 - gain)).abs() < 0.5, "{name}: {pred} vs {}", 5.0 - gain);
+        // At the ceiling the measurement says nothing about the channel.
+        let ceiling0 = modem.ofdm.p.level_snr_ceiling_db[0];
+        assert_eq!(level_by_snr(&modem, ceiling0 + 1.0, 0), top);
         assert_eq!(level_by_snr(&modem, -10.0, top), 0);
         assert_eq!(level_by_snr(&modem, 60.0, 0), top);
     }
+}
+
+#[test]
+fn predicted_snr_matches_the_simulator() {
+    // Measured with the `level_table` benchmark (wide mode): at 24 dB CNR a level-4
+    // burst reports 18.0 dB and a level-5 burst 16.9 dB; at 12 dB CNR a level-0 burst
+    // reports 8.3 dB and a level-5 burst 4.7 dB.
+    let modem = Modem::new(OfdmParams::wide(), 0.1);
+    let p = modem.predict_snr_db(18.0, 4, 5);
+    assert!((p - 16.9).abs() < 0.7, "L4 -> L5 at 24 dB CNR: {p:.1}");
+    let p = modem.predict_snr_db(8.3, 0, 5);
+    assert!((p - 4.7).abs() < 1.0, "L0 -> L5 at 12 dB CNR: {p:.1}");
+    // Narrow: at 14 dB CNR a level-4 burst reports 15.9 dB and a level-5 burst 15.3 dB.
+    let modem = Modem::new(OfdmParams::narrow(), 0.1);
+    let p = modem.predict_snr_db(15.9, 4, 5);
+    assert!((p - 15.3).abs() < 1.0, "narrow L4 -> L5 at 14 dB CNR: {p:.1}");
 }

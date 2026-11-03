@@ -46,13 +46,13 @@ pub const SNR_THRESHOLDS_DB: [f32; 7] = [-2.0, 1.5, 4.5, 7.0, 11.0, 15.0, 18.0];
 const SNR_MARGIN_DB: f32 = 1.0;
 
 /// Highest level whose threshold (plus margin) the SNR would reach, given `snr_db`
-/// measured on a burst sent at `rx_level`. A level sent louder or softer moves the
-/// SNR by the drive difference ([`Modem::level_gain_db`]).
+/// measured on a burst sent at `rx_level`. Each level has its own drive and clipping
+/// floor, so the SNR is first predicted for that level ([`Modem::predict_snr_db`]).
 pub fn level_by_snr(modem: &Modem, snr_db: f32, rx_level: u8) -> u8 {
     SNR_THRESHOLDS_DB
         .iter()
         .enumerate()
-        .rposition(|(l, &t)| snr_db + modem.level_gain_db(rx_level, l as u8) >= t + SNR_MARGIN_DB)
+        .rposition(|(l, &t)| modem.predict_snr_db(snr_db, rx_level, l as u8) >= t + SNR_MARGIN_DB)
         .unwrap_or(0) as u8
 }
 

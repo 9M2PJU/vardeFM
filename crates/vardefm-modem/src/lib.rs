@@ -83,6 +83,7 @@ impl Modem {
             assert_eq!(CW_BITS % (nd * l.modulation.bits_per_symbol()), 0);
         }
         assert_eq!(ofdm.p.level_tx_rms.len(), LEVELS.len());
+        assert_eq!(ofdm.p.level_snr_ceiling_db.len(), LEVELS.len());
         // Levels share codes (k = 1200 three times, 1800 twice): build each once.
         let mut codes: Vec<Ldpc> = Vec::with_capacity(LEVELS.len());
         for l in &LEVELS {
@@ -116,6 +117,21 @@ impl Modem {
     /// The receiver's SNR scales with it while the channel, not clipping, limits it.
     pub fn level_gain_db(&self, from_level: u8, to_level: u8) -> f32 {
         20.0 * (self.tx_rms(to_level) / self.tx_rms(from_level)).log10()
+    }
+
+    /// The SNR (dB) the receiver would report on a burst at `to_level`, given `snr_db`
+    /// measured on a burst at `from_level` over the same channel.
+    ///
+    /// Model: `1/snr = 1/(channel · drive²) + 1/ceiling`. The channel part scales with
+    /// the drive; the ceiling (`OfdmParams::level_snr_ceiling_db`) is the clipping
+    /// floor of each level's drive. A measurement at or above its own ceiling says
+    /// nothing about the channel, so it predicts the other level's ceiling.
+    pub fn predict_snr_db(&self, snr_db: f32, from_level: u8, to_level: u8) -> f32 {
+        let lin = |db: f32| 10f32.powf(db / 10.0);
+        let ceiling = &self.ofdm.p.level_snr_ceiling_db;
+        let inv_channel = (1.0 / lin(snr_db) - 1.0 / lin(ceiling[from_level as usize])).max(0.0);
+        let gain = lin(self.level_gain_db(from_level, to_level));
+        10.0 * (1.0 / (inv_channel / gain + 1.0 / lin(ceiling[to_level as usize]))).log10()
     }
 
     /// Data bytes per codeword at `level`.

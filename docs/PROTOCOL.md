@@ -215,8 +215,9 @@ and 2.2 dB (header).
   for a short random time.
 - **Rate adaptation:** `req_level` is the highest level whose SNR threshold plus 1 dB is
   at or below the predicted SNR at that level. The SNR is measured on a burst sent at the
-  burst's own level; a level with a different TX RMS is predicted to change it by
-  20·log10(RMS_candidate / RMS_received) dB. Thresholds (estimated SNR on a burst at that
+  burst's own level. Another level's SNR is predicted from the drive difference and each
+  level's SNR ceiling (the clipping floor of its drive, measured in the simulator):
+  `1/snr = 1/(channel · drive²) + 1/ceiling`. Thresholds (estimated SNR on a burst at that
   level, levels 0–6): −2, 1.5, 4.5, 7, 11, 15, 18 dB (level 0's is never used). After a
   failed codeword the request drops at least one level below the burst's level. Each
   unanswered burst lowers our own level by one. The called station starts at the level

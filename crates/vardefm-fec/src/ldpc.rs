@@ -7,11 +7,14 @@
 //!   two degrees ([`info_degrees`]). See [`Ldpc::new`] for the exact algorithm.
 //!
 //! Encoding is a running XOR. Codeword = information bits followed by parity bits.
-//! Decoding is layered normalized min-sum.
+//! Decoding is layered offset min-sum.
 
 use vardefm_dsp::prng::Prng;
 
-const ALPHA: f32 = 0.75;
+/// Offset subtracted from every check-to-variable magnitude (offset min-sum). A
+/// normalizing factor below 1 instead would shrink the messages at every hop along the
+/// degree-2 parity chain, and runs of noisy parity bits would then never be corrected.
+const OFFSET: f32 = 0.5;
 const LLR_CLAMP: f32 = 40.0;
 /// Degree of the high-degree information bits.
 const HIGH_DEGREE: usize = 8;
@@ -117,7 +120,7 @@ impl Ldpc {
                     q.push(v);
                 }
                 for (i, e) in (a..b).enumerate() {
-                    let mag = ALPHA * if e == imin { min2 } else { min1 };
+                    let mag = (if e == imin { min2 } else { min1 } - OFFSET).max(0.0);
                     let sign_neg = neg ^ (q[i] < 0.0);
                     let new = if sign_neg { -mag } else { mag };
                     r[e] = new;
@@ -295,13 +298,13 @@ mod tests {
 
     #[test]
     fn corrects_noise() {
-        // Rate 1/2 BPSK at Eb/N0 = 2.0 dB (Es/N0 = -1.0 dB): FER is about 0.5%.
+        // Rate 1/2 BPSK at Eb/N0 = 1.5 dB (Es/N0 = -1.5 dB): FER is about 1%.
         let code = Ldpc::new(2400, 1200, 0x1d9c_0000 + 1200);
         let mut ok = 0;
         for t in 0..20 {
             let info = Prng::new(100 + t).bits(1200);
             let cw = code.encode(&info);
-            let llr = awgn_bpsk(&cw, 2.0 + 10.0 * 0.5f32.log10(), 7 + t);
+            let llr = awgn_bpsk(&cw, 1.5 + 10.0 * 0.5f32.log10(), 7 + t);
             if code.decode(&llr, 50).as_deref() == Some(&info[..]) {
                 ok += 1;
             }

@@ -159,10 +159,11 @@ Payload seeds are 0x1D9C0000 + *k*. A hash of each of these graphs is pinned by 
 
 Informative: none of the graphs has a 4-cycle. The header and rate-1/2 graphs have
 girth 8; the denser high-rate graphs have girth 6. Check degrees differ by at most 2
-within a code. On BPSK/AWGN with the reference decoder, frame error rate 1% is reached
-at Eb/N0 ≈ 1.8 dB (rate 1/2), 2.15 dB (2/3), 2.6 dB (3/4), 3.3 dB (5/6) and 3.7 dB
-(header). The reference decoder is layered normalized min-sum (α = 0.75, 50
-iterations).
+within a code. The reference decoder is layered offset min-sum: every
+check-to-variable magnitude is `max(0, min − 0.5)`, with no scaling, for at most 50
+iterations, and input LLRs are clamped to ±40. On BPSK/AWGN with it, frame error rate
+1% is reached at Eb/N0 ≈ 1.5 dB (rate 1/2), 2.1 dB (2/3), 2.6 dB (3/4), 3.3 dB (5/6)
+and 2.2 dB (header).
 
 ### 2.5 Scrambling and interleaving
 - Information bits are XORed with xorshift32 bits before encoding. The seed is

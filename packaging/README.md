@@ -145,6 +145,13 @@ CM108-based USB interface, AIOC, Digirig or SignaLink. Then:
    little. Without a deviation meter, start low and raise it until another radio
    running `vardefm monitor` sees a clean, steady signal.
 
+   Then check it with real modem audio. A connect request is the loudest
+   transmission VardeFM makes: slow, robust transmissions go out louder than fast
+   ones. Start the modem (section 4) and connect from your program to a callsign
+   that will not answer; VardeFM sends the request 5 times. The peaks should
+   reach about 2.5 kHz and not more. If your radio has a mic compressor or AGC,
+   set the level on the connect request rather than on the tone.
+
 4. **Set the receive level.** While another station transmits:
    ```sh
    vardefm monitor --audio-in "USB"

@@ -20,8 +20,8 @@
 //!   After `ConnectAck`, the called station may send first; the caller waits one
 //!   response period for it.
 //! - **Rate adaptation:** each burst names the speed level the peer should use
-//!   next. It is chosen from the measured SNR and stepped down after codeword
-//!   failures or timeouts.
+//!   next. It is chosen from the measured SNR (normalized for the per-level
+//!   transmit drive) and stepped down after codeword failures or timeouts.
 //! - **Disconnect:** after the host's DISCONNECT, once all sent data is
 //!   acknowledged, the station sends `Disc` and the peer answers `DiscAck`. Both
 //!   then report DISCONNECTED.
@@ -31,10 +31,24 @@ use std::sync::Arc;
 use vardefm_dsp::prng::Prng;
 use vardefm_modem::{Burst, Header, Kind, Modem, RxBurst, FLAG_POLL, LEVELS};
 
-/// Estimated SNR (dB, as reported by the receiver) at which each level decodes
-/// reliably in the FM channel simulator (see the `level_table` benchmark).
-pub const SNR_THRESHOLDS_DB: [f32; 7] = [3.5, 5.0, 7.0, 9.5, 12.5, 16.5, 20.0];
+/// Estimated SNR (dB, as reported by the receiver) on a burst sent at each level, at
+/// which that level decodes reliably in the FM channel simulator (see the
+/// `level_table` benchmark). Each level has its own transmit drive, so a burst
+/// measured at one level is normalized to the drive of another before comparing.
+pub const SNR_THRESHOLDS_DB: [f32; 7] = [3.5, 4.0, 5.0, 9.0, 11.5, 15.5, 18.5];
 const SNR_MARGIN_DB: f32 = 1.0;
+
+/// Highest level whose threshold (plus margin) the SNR would reach, given `snr_db`
+/// measured on a burst sent at `rx_level`. A level sent louder or softer moves the
+/// SNR by the drive difference ([`Modem::level_gain_db`]).
+pub fn level_by_snr(modem: &Modem, snr_db: f32, rx_level: u8) -> u8 {
+    SNR_THRESHOLDS_DB
+        .iter()
+        .enumerate()
+        .rposition(|(l, &t)| snr_db + modem.level_gain_db(rx_level, l as u8) >= t + SNR_MARGIN_DB)
+        .unwrap_or(0) as u8
+}
+
 const SEGMENT_HEADER: usize = 4;
 const OFFSET_MOD: u64 = 1 << 24;
 
@@ -313,7 +327,7 @@ impl Link {
     // ------------------------------------------------------------ receive
 
     fn level_for(&self, rx: &RxBurst) -> u8 {
-        let by_snr = SNR_THRESHOLDS_DB.iter().rposition(|&t| rx.snr_db >= t + SNR_MARGIN_DB).unwrap_or(0) as u8;
+        let by_snr = level_by_snr(&self.modem, rx.snr_db, rx.header.level);
         let failed = rx.payload.iter().any(|p| p.is_none());
         let cap = if failed { rx.header.level.saturating_sub(1) } else { u8::MAX };
         by_snr.min(cap).min(self.cfg.max_level)

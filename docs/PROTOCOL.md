@@ -12,7 +12,18 @@ Contents: 1. Physical layer · 2. Bursts and error correction · 3. Link layer �
 - OFDM with a cyclic prefix. Carrier *k* (0-based) sits at FFT bin `first_bin + k`.
   The time signal is the real part of a Hermitian-symmetric IFFT, scaled by 1/√N.
 - The TX applies a spectral tilt: carrier gain = `10^(tilt · log2(f_k / f_0) / 20)`.
-- Output is scaled to the mode's RMS level and clipped at ±1.0 (full scale = peak deviation).
+- Each burst is scaled to the TX RMS of its speed level (table below; header-only bursts
+  use level 0's), measured over the whole burst including the leader. Robust levels go
+  out louder: they gain more from the extra deviation than they lose to clipping.
+- Peaks are then limited to ±1.0 (full scale = peak deviation) by clip and filter:
+  1. A 4th-order Butterworth low-pass at 1.15 × the top carrier frequency removes the
+     sidelobes of the symbol edges.
+  2. Twice: what clipping at ±1.0 would remove is low-passed forwards and backwards
+     (zero phase) with the same filter and subtracted.
+  3. A final clamp at ±1.0.
+
+  Power above 1.3 × the top carrier stays more than 30 dB below the in-band power even
+  at RMS 0.55 (plain clipping: about 21 dB).
 
 | Parameter | narrow | wide |
 |---|---|---|
@@ -25,7 +36,8 @@ Contents: 1. Physical layer · 2. Bursts and error correction · 3. Link layer �
 | Pilots / data carriers | 9 / 40 | 12 / 50 |
 | Symbol rate | 41.67 /s | 83.33 /s |
 | TX tilt | 0 dB/oct | +3 dB/oct |
-| TX RMS | 0.25 | 0.30 |
+| TX RMS, levels 0–2 / 3–4 / 5–6 | 0.30 / 0.30 / 0.25 | 0.50 / 0.40 / 0.30 |
+| TX low-pass | 3073 Hz | 6900 Hz |
 
 ### 1.2 Pseudo-random sequences
 All known sequences come from xorshift32 (`x ^= x<<13; x ^= x>>17; x ^= x<<5`). Each
@@ -103,7 +115,7 @@ carries `k/8 − 4` data bytes followed by a big-endian CRC-32.
 Net rate = data bytes of a full burst ÷ its airtime (leader, preambles and header
 included), before link-layer overhead. In the FM channel simulator, level 6 decodes
 error-free from about 20 dB carrier-to-noise in narrow mode and 28 dB in wide mode.
-Level 1 decodes from 8 dB (narrow) and 12 dB (wide).
+Level 1 decodes from 8 dB (narrow) and 10 dB (wide).
 
 ### 2.3 Header (96 bits before coding)
 80 bits of fields, MSB first, then a CRC-16/CCITT-FALSE (poly 0x1021, init 0xFFFF) over
@@ -172,7 +184,10 @@ The reference decoder is layered normalized min-sum (α = 0.75, 50 iterations).
   link goes quiet. Either station may then start a burst once the channel has been clear
   for a short random time.
 - **Rate adaptation:** `req_level` is the highest level whose SNR threshold plus 1 dB is
-  at or below the measured SNR. Thresholds: 3.5, 5, 7, 9.5, 12.5, 16.5, 20 dB. After a
+  at or below the predicted SNR at that level. The SNR is measured on a burst sent at the
+  burst's own level; a level with a different TX RMS is predicted to change it by
+  20·log10(RMS_candidate / RMS_received) dB. Thresholds (estimated SNR on a burst at that
+  level, levels 0–6): 3.5, 4, 5, 9, 11.5, 15.5, 18.5 dB. After a
   failed codeword the request drops at least one level below the burst's level. Each
   unanswered burst lowers our own level by one. The called station starts at the level
   it measured on the connect request.

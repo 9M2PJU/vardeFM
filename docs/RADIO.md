@@ -66,6 +66,13 @@ your user needs to be in group `gpio` (the default user already is):
    ```powershell
    .\vardefm tone --audio-out "USB Audio" --ptt cm108 --seconds 10
    ```
+   Then check the level with real modem audio. Bursts at the robust speed levels
+   go out louder than the fast ones, and a connect request is the loudest burst
+   VardeFM sends (RMS 0.30 narrow, 0.50 wide; peaks at full scale). Start the
+   modem and let your program call a station that is not there: VardeFM sends
+   the request 5 times. Its peaks should reach the deviation above and not
+   go past it. If the radio has a mic compressor or AGC, the tone and the modem
+   audio can deviate differently; then set the level on the connect request.
 
 4. **Set the receive level.** Let another station transmit (or play
    `tx-wav` audio from a second radio). Adjust the input level so peaks sit

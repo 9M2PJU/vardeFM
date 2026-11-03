@@ -82,6 +82,7 @@ impl Modem {
         for l in &LEVELS {
             assert_eq!(CW_BITS % (nd * l.modulation.bits_per_symbol()), 0);
         }
+        assert_eq!(ofdm.p.level_tx_rms.len(), LEVELS.len());
         Self {
             hdr_syms: HDR_CODE_BITS / nd,
             hdr_code: Ldpc::new(HDR_CODE_BITS, HDR_INFO_BITS, SEED_HDR_CODE),
@@ -95,6 +96,17 @@ impl Modem {
 
     pub fn fs(&self) -> f32 {
         self.ofdm.p.fs
+    }
+
+    /// Output RMS level of a burst at `level` (1.0 = full scale = peak deviation).
+    pub fn tx_rms(&self, level: u8) -> f32 {
+        self.ofdm.p.level_tx_rms[level as usize]
+    }
+
+    /// How much louder (dB) a burst at `to_level` goes out than one at `from_level`.
+    /// The receiver's SNR scales with it while the channel, not clipping, limits it.
+    pub fn level_gain_db(&self, from_level: u8, to_level: u8) -> f32 {
+        20.0 * (self.tx_rms(to_level) / self.tx_rms(from_level)).log10()
     }
 
     /// Data bytes per codeword at `level`.
@@ -188,7 +200,7 @@ impl Modem {
                 symbols.push(m.map_all(chunk));
             }
         }
-        self.ofdm.modulate_with_leader(&symbols, self.txdelay)
+        self.ofdm.modulate_with_leader_rms(&symbols, self.txdelay, self.tx_rms(h.level))
     }
 
     /// The header's data-carrier values, one Vec per OFDM symbol, as transmitted.

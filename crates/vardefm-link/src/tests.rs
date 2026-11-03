@@ -269,3 +269,26 @@ fn idle_link_is_kept_alive_then_dropped_when_peer_dies() {
     net.nodes[0].dead = true;
     net.run_until(200.0, |n| n.nodes[1].link.is_idle());
 }
+
+#[test]
+fn rate_choice_accounts_for_drive_per_level() {
+    for params in [OfdmParams::narrow(), OfdmParams::wide()] {
+        let modem = Modem::new(params, 0.1);
+        let top = LEVELS.len() as u8 - 1;
+        for l in 0..=top {
+            // Just above the threshold, measured on a burst at that level.
+            let at = SNR_THRESHOLDS_DB[l as usize] + SNR_MARGIN_DB + 0.01;
+            assert!(level_by_snr(&modem, at, l) >= l, "{} level {l}", modem.ofdm.p.name);
+            // The same channel measured on a louder level-0 burst.
+            assert!(level_by_snr(&modem, at + modem.level_gain_db(l, 0), 0) >= l);
+        }
+        // A loud burst's SNR overstates what a softer, faster level would get.
+        let gain = modem.level_gain_db(top, 0);
+        assert!(gain > 0.0);
+        let snr = SNR_THRESHOLDS_DB[top as usize] + SNR_MARGIN_DB + gain / 2.0;
+        assert!(level_by_snr(&modem, snr, 0) < top);
+        assert_eq!(level_by_snr(&modem, snr, top), top);
+        assert_eq!(level_by_snr(&modem, -10.0, top), 0);
+        assert_eq!(level_by_snr(&modem, 60.0, 0), top);
+    }
+}

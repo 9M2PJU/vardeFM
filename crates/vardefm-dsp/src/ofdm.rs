@@ -25,6 +25,10 @@ const MIN_PREAMBLE_CORR: f32 = 0.3;
 /// noise scale. Normal symbols almost never get there (the per-symbol estimate averages
 /// 18-24 real noise samples).
 const SCALE_THRESHOLD: f32 = 2.0;
+/// TX low-pass cutoff relative to the top carrier frequency.
+const TX_LOWPASS_FACTOR: f32 = 1.15;
+/// Clip-and-filter passes before the final clamp.
+const CLIP_FILTER_PASSES: usize = 2;
 
 pub struct Ofdm {
     pub p: OfdmParams,
@@ -140,11 +144,52 @@ impl Ofdm {
         self.modulate_with_leader(data, 0.0)
     }
 
-    /// Build a frame preceded by at least `leader_s` seconds of filler symbols.
+    /// Build a frame preceded by at least `leader_s` seconds of filler symbols, at the
+    /// mode's reference level `p.tx_rms`.
     /// The leader covers the radio's key-up time (PTT to carrier up and squelch open)
     /// and lets the receiver's audio levels settle. The filler is random QPSK, so it
     /// cannot be mistaken for preamble A.
     pub fn modulate_with_leader(&self, data: &[Vec<Complex32>], leader_s: f32) -> Vec<f32> {
+        self.modulate_with_leader_rms(data, leader_s, self.p.tx_rms)
+    }
+
+    /// Like [`Ofdm::modulate_with_leader`], at RMS level `rms` (1.0 = full scale).
+    ///
+    /// The frame is scaled to `rms` before clipping, so the level is exact unless peaks
+    /// are clipped. Clipping splatters far outside the carriers, and in wide mode the
+    /// audio goes straight to the radio's VCO, so the output is shaped:
+    /// 1. A low-pass just above the top carrier removes the sidelobes of the symbol edges.
+    /// 2. Clip and filter: what clipping at full scale would remove is low-passed and
+    ///    subtracted. The correction is filtered forwards and backwards (zero phase), so it
+    ///    stays aligned with the peaks it cuts; each pass leaves less overshoot.
+    /// 3. A final clamp to ±1.0 catches what overshoot is left.
+    ///
+    /// The low-pass is linear and time-invariant and the corrections only touch peaks, so
+    /// preamble A stays periodic enough for detection.
+    pub fn modulate_with_leader_rms(&self, data: &[Vec<Complex32>], leader_s: f32, rms: f32) -> Vec<f32> {
+        let mut out = self.frame_samples(data, leader_s);
+        let now = (out.iter().map(|x| x * x).sum::<f32>() / out.len() as f32).sqrt();
+        let g = rms / now.max(1e-12);
+        out.iter_mut().for_each(|x| *x *= g);
+        let lowpass = || Chain::lowpass4(self.p.fs, self.tx_lowpass_hz());
+        lowpass().process_buf(&mut out);
+        for _ in 0..CLIP_FILTER_PASSES {
+            let mut e: Vec<f32> = out.iter().map(|x| x.clamp(-1.0, 1.0) - x).collect();
+            if e.iter().all(|&v| v == 0.0) {
+                break;
+            }
+            lowpass().process_buf(&mut e);
+            e.reverse();
+            lowpass().process_buf(&mut e);
+            e.reverse();
+            out.iter_mut().zip(&e).for_each(|(x, e)| *x += e);
+        }
+        out.iter_mut().for_each(|x| *x = x.clamp(-1.0, 1.0));
+        out
+    }
+
+    /// Unscaled samples of a frame with its leader.
+    fn frame_samples(&self, data: &[Vec<Complex32>], leader_s: f32) -> Vec<f32> {
         let nc = self.p.num_carriers;
         let n_leader = (leader_s / self.p.symbol_duration()).ceil() as usize;
         let mut out = Vec::with_capacity(self.frame_len(data.len()) + n_leader * self.p.symbol_len());
@@ -166,10 +211,12 @@ impl Ofdm {
             }
             out.extend(self.symbol_time(&c));
         }
-        let rms = (out.iter().map(|x| x * x).sum::<f32>() / out.len() as f32).sqrt();
-        let g = self.p.tx_rms / rms.max(1e-12);
-        out.iter_mut().for_each(|x| *x = (*x * g).clamp(-1.0, 1.0));
         out
+    }
+
+    /// Cutoff of the TX splatter filter.
+    pub fn tx_lowpass_hz(&self) -> f32 {
+        self.p.carrier_freq(self.p.num_carriers - 1) * TX_LOWPASS_FACTOR
     }
 
     /// FFT of the window starting at `pos`, returning only the carrier bins.
@@ -491,5 +538,99 @@ mod tests {
     #[test]
     fn clean_roundtrip_wide() {
         roundtrip(OfdmParams::wide(), Modulation::Qam64, 1234);
+    }
+
+    fn random_frame(ofdm: &Ofdm, m: Modulation, nsym: usize, seed: u32) -> Vec<Vec<Complex32>> {
+        let mut rng = Prng::new(seed);
+        let bits = rng.bits(nsym * ofdm.data_carriers() * m.bits_per_symbol());
+        m.map_all(&bits).chunks(ofdm.data_carriers()).map(|c| c.to_vec()).collect()
+    }
+
+    fn rms(x: &[f32]) -> f32 {
+        (x.iter().map(|v| v * v).sum::<f32>() / x.len() as f32).sqrt()
+    }
+
+    /// Power in each [lo, hi) Hz band, from a Hann-windowed Welch average.
+    fn band_power(x: &[f32], fs: f32, bands: &[(f32, f32)]) -> Vec<f32> {
+        let n = 2048;
+        let fft = FftPlanner::new().plan_fft_forward(n);
+        let win: Vec<f32> =
+            (0..n).map(|i| 0.5 - 0.5 * (2.0 * std::f32::consts::PI * i as f32 / n as f32).cos()).collect();
+        let mut psd = vec![0f32; n / 2];
+        for blk in x.windows(n).step_by(n / 2) {
+            let mut b: Vec<Complex32> = blk.iter().zip(&win).map(|(&v, &w)| Complex32::new(v * w, 0.0)).collect();
+            fft.process(&mut b);
+            psd.iter_mut().zip(&b).for_each(|(p, c)| *p += c.norm_sqr());
+        }
+        let hz = fs / n as f32;
+        bands
+            .iter()
+            .map(|&(lo, hi)| {
+                psd.iter().enumerate().filter(|(i, _)| (lo..hi).contains(&(*i as f32 * hz))).map(|(_, p)| p).sum()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn frame_rms_matches_request() {
+        for p in [OfdmParams::narrow(), OfdmParams::wide()] {
+            let ofdm = Ofdm::new(p);
+            let data = random_frame(&ofdm, Modulation::Qam16, 40, 7);
+            // Levels with (almost) no clipping: only the filter can move the level.
+            for want in [0.05, 0.1, 0.2] {
+                let got = rms(&ofdm.modulate_with_leader_rms(&data, 0.1, want));
+                assert!((got / want - 1.0).abs() < 0.03, "{} rms {got} want {want}", ofdm.p.name);
+            }
+            assert_eq!(ofdm.modulate(&data), ofdm.modulate_with_leader_rms(&data, 0.0, ofdm.p.tx_rms));
+        }
+    }
+
+    #[test]
+    fn clipping_splatter_is_filtered() {
+        for p in [OfdmParams::narrow(), OfdmParams::wide()] {
+            let ofdm = Ofdm::new(p);
+            let fs = ofdm.p.fs;
+            let top = ofdm.p.carrier_freq(ofdm.p.num_carriers - 1);
+            let bands = [(ofdm.p.carrier_freq(0), top), (1.3 * top, fs / 2.0)];
+            let data = random_frame(&ofdm, Modulation::Qam64, 60, 9);
+            // Louder than the loudest level the modem uses (0.5).
+            let level = 0.55;
+            let tx = ofdm.modulate_with_leader_rms(&data, 0.1, level);
+            assert!(tx.iter().all(|v| v.abs() <= 1.0));
+            let pw = band_power(&tx, fs, &bands);
+            let oob_db = 10.0 * (pw[1] / pw[0]).log10();
+            // The same frame scaled and clipped without shaping, for comparison.
+            let mut raw = ofdm.frame_samples(&data, 0.1);
+            let g = level / rms(&raw);
+            raw.iter_mut().for_each(|v| *v = (*v * g).clamp(-1.0, 1.0));
+            let clipped = raw.iter().filter(|v| v.abs() >= 1.0).count() as f32 / raw.len() as f32;
+            assert!(clipped > 0.04, "{}: only {clipped} of samples clipped", ofdm.p.name);
+            let pr = band_power(&raw, fs, &bands);
+            let raw_db = 10.0 * (pr[1] / pr[0]).log10();
+            println!("{}: out-of-band {oob_db:.1} dB (clipped only: {raw_db:.1} dB)", ofdm.p.name);
+            assert!(oob_db < -30.0, "{}: out-of-band power {oob_db:.1} dB", ofdm.p.name);
+        }
+    }
+
+    #[test]
+    fn clipped_frame_still_decodes() {
+        for p in [OfdmParams::narrow(), OfdmParams::wide()] {
+            let ofdm = Ofdm::new(p);
+            let m = Modulation::Qpsk;
+            let mut rng = Prng::new(5);
+            let bits = rng.bits(20 * ofdm.data_carriers() * m.bits_per_symbol());
+            let data: Vec<Vec<Complex32>> = m.map_all(&bits).chunks(ofdm.data_carriers()).map(|c| c.to_vec()).collect();
+            let mut rx = vec![0.0; 777];
+            rx.extend(ofdm.modulate_with_leader_rms(&data, 0.1, 0.5));
+            rx.extend(vec![0.0; 2000]);
+            let b = ofdm.detect(&rx, 0).expect("frame not detected");
+            let frame = ofdm.demodulate(&rx, b, data.len()).expect("demod failed");
+            let mut out = Vec::new();
+            for s in frame.symbols.iter().flatten() {
+                m.hard_bits(*s, &mut out);
+            }
+            assert_eq!(out, bits, "{}", ofdm.p.name);
+            println!("{}: SNR at rms 0.5 without noise {:.1} dB", ofdm.p.name, frame.snr_db);
+        }
     }
 }

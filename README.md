@@ -153,13 +153,14 @@ GitHub Actions runs the checks and tests on Windows, Linux x86-64, Linux ARM and
 push and pull request, and builds all release archives (kept 7 days as workflow artifacts).
 To publish a release:
 
-1. Set `version` in the root `Cargo.toml` (e.g. `0.2.0`), run `cargo build` to update
-   `Cargo.lock`, and commit.
-2. Tag and push: `git tag v0.2.0; git push origin master v0.2.0`.
+1. Set `version` in the root `Cargo.toml` (e.g. `0.3.0`), run `cargo build` to update
+   `Cargo.lock`, add the release to [CHANGELOG.md](CHANGELOG.md), and commit. Bump the
+   minor version whenever the on-air protocol changes.
+2. Tag and push: `git tag v0.3.0; git push origin master v0.3.0`.
 
 The release workflow checks that the tag matches `Cargo.toml`, runs the tests, builds the
 six archives plus `checksums.txt`, and publishes the release with notes generated from the
-commits. A tag with a suffix such as `v0.2.0-rc1` becomes a pre-release.
+commits. A tag with a suffix such as `v0.3.0-rc1` becomes a pre-release.
 
 ## License
 

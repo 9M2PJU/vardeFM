@@ -22,8 +22,9 @@ rate-adaptation thresholds all changed. Both stations must upgrade.
   loudest bursts: calibrate deviation while the modem sends a connect request (see
   `docs/RADIO.md`).
 - **Receiver channel estimate** is trained on the decoded header symbols as well as the
-  preamble, and a per-symbol noise scale down-weights symbols hit by an FM click or
-  squelch pop so one bad symbol no longer sinks a codeword.
+  preamble, each weighted by the inverse of its noise so a click on a header symbol does
+  not corrupt the estimate. A per-symbol noise scale down-weights payload symbols hit by
+  an FM click or squelch pop so one bad symbol no longer sinks a codeword.
 - **Rate adaptation** thresholds were re-measured on a 0.25 dB grid. Another level's SNR
   is predicted from the measured burst with a drive-and-ceiling model
   (`1/snr = 1/(channel · drive²) + 1/ceiling`), so the link no longer stalls below the

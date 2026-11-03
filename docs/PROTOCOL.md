@@ -78,7 +78,9 @@ The reference receiver:
    over the frame.
 4. Estimates the channel from preamble B, smoothed across frequency, and decodes the
    header with it. Once the header has decoded, it demodulates the frame again with the
-   header symbols (now known) averaged into the channel estimate.
+   header symbols (now known) averaged into the channel estimate, each weighted by the
+   inverse of its noise: the header decodes through a click on one of its symbols, and
+   that symbol must not corrupt the estimate.
 5. Tracks it with pilots averaged over ±4 symbols and interpolated in magnitude and phase.
 6. Estimates the noise per carrier and, from the pilots, a noise scale per symbol, so
    that a symbol hit by an FM click or a squelch pop gets low-confidence LLRs.

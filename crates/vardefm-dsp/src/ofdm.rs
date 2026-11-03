@@ -340,19 +340,29 @@ impl Ofdm {
         // takes that out, so the symbols are simply averaged. (Removing each symbol's own
         // phase slope instead costs up to 2 dB at low SNR: the slope estimate is noisy and
         // its error grows across the band.)
-        let mut acc: Vec<Complex32> = (0..nc).map(|k| yb[k] / self.pre_b[k]).collect();
         let nk = known.len().min(nsym);
+        let mut obs: Vec<Vec<Complex32>> = Vec::with_capacity(nk + 1);
+        obs.push((0..nc).map(|k| yb[k] / self.pre_b[k]).collect());
         for (i, d) in known[..nk].iter().enumerate() {
             assert_eq!(d.len(), self.data_idx.len(), "wrong number of known symbols");
+            let mut o = vec![Complex32::new(0.0, 0.0); nc];
             for (j, &k) in self.data_idx.iter().enumerate() {
-                acc[k] += ys[i][k] / d[j];
+                o[k] = ys[i][k] / d[j];
             }
             for (m, &k) in self.pilot_idx.iter().enumerate() {
-                acc[k] += ys[i][k] * self.pilot_value(i, m);
+                o[k] = ys[i][k] * self.pilot_value(i, m);
             }
+            obs.push(o);
         }
-        let ntrain = (nk + 1) as f32;
-        acc.iter_mut().for_each(|a| *a /= ntrain);
+        // A header symbol hit by an FM click can still decode (the header code is rate
+        // 0.24) and so be offered as training. At full weight it would corrupt the
+        // estimate for every carrier of the burst, which the per-symbol noise scale
+        // below cannot undo. So each training symbol is weighted by the inverse of its
+        // noise, and `ntrain` is the effective number of symbols averaged.
+        let weights = training_weights(&obs);
+        let ntrain: f32 = weights.iter().sum();
+        let acc: Vec<Complex32> =
+            (0..nc).map(|k| obs.iter().zip(&weights).map(|(o, &w)| o[k] * w).sum::<Complex32>() / ntrain).collect();
         // Light [1 2 1]/4 smoothing across frequency (the audio channel response is
         // smooth). It still pays with the header averaged in: dropping it costs about
         // 0.5 dB in wide mode. Remove the linear phase from the timing offset first, or
@@ -473,6 +483,32 @@ fn track_pilots(cs: &[Vec<Complex32>], scale: &[f32]) -> (Vec<Vec<Complex32>>, V
     (avgs, devs)
 }
 
+/// Weight per channel observation (one per training symbol): 1 for a symbol whose
+/// deviation from the plain average is at most `SCALE_THRESHOLD` times the typical
+/// level, otherwise typical / own, so that a symbol hit by a click adds almost nothing.
+/// Fewer than three observations cannot show an outlier and all get weight 1.
+fn training_weights(obs: &[Vec<Complex32>]) -> Vec<f32> {
+    let n = obs.len();
+    if n < 3 {
+        return vec![1.0; n];
+    }
+    let nc = obs[0].len();
+    let mean: Vec<Complex32> = (0..nc).map(|k| obs.iter().map(|o| o[k]).sum::<Complex32>() / n as f32).collect();
+    let e: Vec<f32> = obs.iter().map(|o| o.iter().zip(&mean).map(|(x, h)| (x - h).norm_sqr()).sum()).collect();
+    let reference = robust_reference(&e);
+    e.iter().map(|x| x / reference).map(|r| if r > SCALE_THRESHOLD { 1.0 / r } else { 1.0 }).collect()
+}
+
+/// Typical level of `e`: the mean over the values not far above the median, so that
+/// the outliers (clicks) do not raise it.
+fn robust_reference(e: &[f32]) -> f32 {
+    let mut sorted = e.to_vec();
+    sorted.sort_by(f32::total_cmp);
+    let median = sorted[e.len() / 2];
+    let (sum, cnt) = e.iter().filter(|&&x| x <= 3.0 * median).fold((0.0, 0), |(s, c), &x| (s + x, c + 1));
+    (sum / cnt.max(1) as f32).max(1e-12)
+}
+
 /// Fit the pilot deviations to a separable noise model: variance = per-pilot variance
 /// × per-symbol scale. Returns (scale per symbol, at least 1; variance per pilot).
 ///
@@ -494,13 +530,7 @@ fn noise_model(dev: &[Vec<f32>]) -> (Vec<f32>, Vec<f32>) {
     // Noise energy per symbol, each pilot relative to its own average.
     let e: Vec<f32> =
         dev.iter().map(|d| d.iter().zip(&var).map(|(x, v)| x / v.max(1e-12)).sum::<f32>() / np as f32).collect();
-    // Reference level: the mean over symbols not far above the median, so that the
-    // clicks themselves do not raise it.
-    let mut sorted = e.clone();
-    sorted.sort_by(f32::total_cmp);
-    let median = sorted[nsym / 2];
-    let (sum, cnt) = e.iter().filter(|&&x| x <= 3.0 * median).fold((0.0, 0), |(s, c), &x| (s + x, c + 1));
-    let reference = (sum / cnt.max(1) as f32).max(1e-12);
+    let reference = robust_reference(&e);
     let scale: Vec<f32> = e.iter().map(|x| x / reference).map(|r| if r > SCALE_THRESHOLD { r } else { 1.0 }).collect();
     let var = per_pilot(&scale);
     (scale, var)

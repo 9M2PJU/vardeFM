@@ -238,3 +238,56 @@ fn header_only_burst_reports_the_same_snr() {
         assert!((snr[0] - snr[1]).abs() < 1.0, "{mode}: header-only {:.1} dB, data {:.1} dB", snr[0], snr[1]);
     }
 }
+
+/// Error vector magnitude (dB, relative to the symbol power) of the equalized header
+/// symbols of `f` against the transmitted values, skipping symbol `skip`.
+fn header_evm_db(f: &Frame, known: &[Vec<Complex32>], skip: usize) -> f32 {
+    let (mut err, mut sig) = (0.0, 0.0);
+    for (i, k) in known.iter().enumerate().filter(|(i, _)| *i != skip) {
+        for (y, x) in f.symbols[i].iter().zip(k) {
+            err += (y - x).norm_sqr();
+            sig += x.norm_sqr();
+        }
+    }
+    10.0 * (err / sig).log10()
+}
+
+#[test]
+fn survives_a_click_in_the_header() {
+    // A click on a header symbol: the header still decodes (its code is rate 0.24),
+    // so the symbol is offered as channel training. Averaged in at full weight it
+    // would corrupt the estimate for every carrier of the burst, which no later
+    // per-symbol scale can undo. The training must leave it out.
+    let (mode, level, ncw) = ("narrow", 6, 4);
+    let m = modem(mode);
+    let b = burst(level, ncw, 31);
+    let (clean, start) = received(&m, mode, &b, 24.0);
+    let p = &m.ofdm.p;
+    let l = p.symbol_len();
+    let nsym = m.header_symbols() + ncw * m.symbols_per_codeword(level);
+    let hit = m.header_symbols() / 2;
+    let from = start + (hit + 1) * l - p.ncp;
+    let sig = &clean[start..start + nsym * l];
+    let rms = (sig.iter().map(|x| x * x).sum::<f32>() / sig.len() as f32).sqrt();
+    let a = 3.0 * rms * 3f32.sqrt();
+    let mut audio = clean.clone();
+    let mut rng = Prng::new(78);
+    for x in &mut audio[from..from + l] {
+        *x = a * (rng.next_u32() as f32 / u32::MAX as f32 * 2.0 - 1.0);
+    }
+
+    let known = m.header_carriers(&b.header);
+    let reference = m.ofdm.demodulate_known(&clean, start, nsym, &known).unwrap();
+    let frame = m.ofdm.demodulate_known(&audio, start, nsym, &known).unwrap();
+    assert!(frame.symbol_noise_scale[hit] > 10.0, "scales {:?}", frame.symbol_noise_scale);
+    let (evm_ref, evm) = (header_evm_db(&reference, &known, hit), header_evm_db(&frame, &known, hit));
+    assert!(evm < evm_ref + 1.0, "header EVM {evm:.1} dB with the click, {evm_ref:.1} dB without");
+    let ok = m.decode_payload(&b.header, &frame).iter().filter(|p| p.is_some()).count();
+    assert_eq!(ok, ncw);
+
+    // And through the streaming receiver, where the header is decoded first.
+    let got = receive(&mut Receiver::new(m.clone()), &audio);
+    assert_eq!(got.len(), 1);
+    assert_eq!(got[0].header, b.header);
+    assert!(got[0].payload.iter().all(|p| p.is_some()));
+}

@@ -294,15 +294,14 @@ fn buffer_report_follows_every_write() {
     a.command("CONNECT LA1AAA LA2BBB");
     a.expect("CONNECTED");
     for i in 0..5 {
-        // Drain anything already queued so the BUFFER we see is new.
-        thread::sleep(Duration::from_millis(30));
-        while let Ok(l) = a.lines.try_recv() {
-            a.seen.push(l);
-        }
         a.write(&payload(10, i));
         let l = a.expect("BUFFER ");
         let n: usize = l[7..].parse().unwrap();
         assert!(n > 0, "write {i}: report after the write still says {l}");
+        // Wait for the acknowledgement's report before the next write, so that no
+        // report is in flight when it goes out and the one we see is its own. (A
+        // fixed drain delay raced the ack on slow CI runners.)
+        a.expect("BUFFER 0");
     }
     sp.stop();
 }

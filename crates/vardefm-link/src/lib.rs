@@ -20,8 +20,8 @@
 //!   After `ConnectAck`, the called station may send first; the caller waits one
 //!   response period for it.
 //! - **Rate adaptation:** each burst names the speed level the peer should use
-//!   next. It is chosen from the measured SNR and stepped down after codeword
-//!   failures or timeouts.
+//!   next. It is chosen from the measured SNR (normalized for the per-level
+//!   transmit drive) and stepped down after codeword failures or timeouts.
 //! - **Disconnect:** after the host's DISCONNECT, once all sent data is
 //!   acknowledged, the station sends `Disc` and the peer answers `DiscAck`. Both
 //!   then report DISCONNECTED.
@@ -31,10 +31,31 @@ use std::sync::Arc;
 use vardefm_dsp::prng::Prng;
 use vardefm_modem::{Burst, Header, Kind, Modem, RxBurst, FLAG_POLL, LEVELS};
 
-/// Estimated SNR (dB, as reported by the receiver) at which each level decodes
-/// reliably in the FM channel simulator (see the `level_table` benchmark).
-pub const SNR_THRESHOLDS_DB: [f32; 7] = [3.5, 5.0, 7.0, 9.5, 12.5, 16.5, 20.0];
+/// Estimated SNR (dB, as reported by the receiver) on a burst sent at each level, at
+/// which that level decodes reliably in the FM channel simulator (see the
+/// `level_table` benchmark). Each level has its own transmit drive, so a burst
+/// measured at one level is normalized to the drive of another before comparing.
+///
+/// Each value is the highest SNR of any burst at that level with a failed codeword,
+/// or the lowest SNR from which every burst decoded fully if higher, rounded up to
+/// 0.5 dB, in the worse of the two modes. So with the margin, a level is only
+/// requested at least 1 dB above every failure seen. Below about 10 dB the SNR
+/// estimate falls fast with CNR (FM threshold), so the low levels' values are small
+/// or negative; level 0's is never used.
+pub const SNR_THRESHOLDS_DB: [f32; 7] = [-2.0, 1.5, 4.5, 7.0, 11.0, 15.0, 18.0];
 const SNR_MARGIN_DB: f32 = 1.0;
+
+/// Highest level whose threshold (plus margin) the SNR would reach, given `snr_db`
+/// measured on a burst sent at `rx_level`. Each level has its own drive and clipping
+/// floor, so the SNR is first predicted for that level ([`Modem::predict_snr_db`]).
+pub fn level_by_snr(modem: &Modem, snr_db: f32, rx_level: u8) -> u8 {
+    SNR_THRESHOLDS_DB
+        .iter()
+        .enumerate()
+        .rposition(|(l, &t)| modem.predict_snr_db(snr_db, rx_level, l as u8) >= t + SNR_MARGIN_DB)
+        .unwrap_or(0) as u8
+}
+
 const SEGMENT_HEADER: usize = 4;
 const OFFSET_MOD: u64 = 1 << 24;
 
@@ -313,7 +334,7 @@ impl Link {
     // ------------------------------------------------------------ receive
 
     fn level_for(&self, rx: &RxBurst) -> u8 {
-        let by_snr = SNR_THRESHOLDS_DB.iter().rposition(|&t| rx.snr_db >= t + SNR_MARGIN_DB).unwrap_or(0) as u8;
+        let by_snr = level_by_snr(&self.modem, rx.snr_db, rx.header.level);
         let failed = rx.payload.iter().any(|p| p.is_none());
         let cap = if failed { rx.header.level.saturating_sub(1) } else { u8::MAX };
         by_snr.min(cap).min(self.cfg.max_level)

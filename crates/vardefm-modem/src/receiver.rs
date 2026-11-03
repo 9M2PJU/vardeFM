@@ -90,11 +90,14 @@ impl Receiver {
                 return Some(false);
             }
             self.pending = None;
-            let Some(frame) = m.ofdm.demodulate(&self.buf, b, nsym) else {
+            // The header decoded and passed its CRC, so its symbols are known: they
+            // train the channel estimate for the payload.
+            let known = m.header_carriers(&h);
+            let Some(frame) = m.ofdm.demodulate_known(&self.buf, b, nsym, &known) else {
                 self.search = b;
                 return Some(true);
             };
-            let payload = m.decode_payload(&h, &frame.symbols[hdr_syms..], &frame.noise_var);
+            let payload = m.decode_payload(&h, &frame);
             out.push(RxBurst { header: h, payload, snr_db: frame.snr_db, end_sample: self.base + frame.end as u64 });
             self.search = frame.end.min(self.buf.len());
             return Some(true);
@@ -108,17 +111,20 @@ impl Receiver {
                     self.search = b.saturating_sub(3 * l);
                     return Some(false);
                 }
-                let header = m
-                    .ofdm
-                    .demodulate(&self.buf, b, hdr_syms)
-                    .and_then(|f| m.decode_header(&f.symbols, &f.noise_var).map(|h| (h, f)));
+                let header =
+                    m.ofdm.demodulate(&self.buf, b, hdr_syms).and_then(|f| m.decode_header(&f).map(|h| (h, f)));
                 match header {
                     None => self.search = b,
                     Some((h, f)) if h.ncw == 0 => {
+                        // Measure the SNR the way a data burst does (with the header as
+                        // training), so that rate adaptation sees the same numbers.
+                        let known = m.header_carriers(&h);
+                        let snr_db =
+                            m.ofdm.demodulate_known(&self.buf, b, hdr_syms, &known).map_or(f.snr_db, |g| g.snr_db);
                         out.push(RxBurst {
                             header: h,
                             payload: Vec::new(),
-                            snr_db: f.snr_db,
+                            snr_db,
                             end_sample: self.base + f.end as u64,
                         });
                         self.search = f.end.min(self.buf.len());

@@ -13,7 +13,7 @@ pub use header::{Header, Kind, FLAG_POLL};
 pub use receiver::{Receiver, RxBurst};
 pub use vardefm_dsp::OfdmParams;
 
-use vardefm_dsp::{Complex32, Modulation, Ofdm};
+use vardefm_dsp::{Complex32, Frame, Modulation, Ofdm};
 use vardefm_fec::{bytes_to_bits, crc, permutation, scramble_bits, Ldpc};
 
 /// Bits per payload codeword.
@@ -82,10 +82,21 @@ impl Modem {
         for l in &LEVELS {
             assert_eq!(CW_BITS % (nd * l.modulation.bits_per_symbol()), 0);
         }
+        assert_eq!(ofdm.p.level_tx_rms.len(), LEVELS.len());
+        assert_eq!(ofdm.p.level_snr_ceiling_db.len(), LEVELS.len());
+        // Levels share codes (k = 1200 three times, 1800 twice): build each once.
+        let mut codes: Vec<Ldpc> = Vec::with_capacity(LEVELS.len());
+        for l in &LEVELS {
+            let code = match codes.iter().find(|c| c.k == l.k) {
+                Some(c) => c.clone(),
+                None => Ldpc::new(CW_BITS, l.k, SEED_CODE + l.k as u32),
+            };
+            codes.push(code);
+        }
         Self {
             hdr_syms: HDR_CODE_BITS / nd,
             hdr_code: Ldpc::new(HDR_CODE_BITS, HDR_INFO_BITS, SEED_HDR_CODE),
-            codes: LEVELS.iter().map(|l| Ldpc::new(CW_BITS, l.k, SEED_CODE + l.k as u32)).collect(),
+            codes,
             hdr_perm: permutation(SEED_HDR_INTERLEAVE, HDR_CODE_BITS),
             ofdm,
             txdelay,
@@ -95,6 +106,32 @@ impl Modem {
 
     pub fn fs(&self) -> f32 {
         self.ofdm.p.fs
+    }
+
+    /// Output RMS level of a burst at `level` (1.0 = full scale = peak deviation).
+    pub fn tx_rms(&self, level: u8) -> f32 {
+        self.ofdm.p.level_tx_rms[level as usize]
+    }
+
+    /// How much louder (dB) a burst at `to_level` goes out than one at `from_level`.
+    /// The receiver's SNR scales with it while the channel, not clipping, limits it.
+    pub fn level_gain_db(&self, from_level: u8, to_level: u8) -> f32 {
+        20.0 * (self.tx_rms(to_level) / self.tx_rms(from_level)).log10()
+    }
+
+    /// The SNR (dB) the receiver would report on a burst at `to_level`, given `snr_db`
+    /// measured on a burst at `from_level` over the same channel.
+    ///
+    /// Model: `1/snr = 1/(channel · drive²) + 1/ceiling`. The channel part scales with
+    /// the drive; the ceiling (`OfdmParams::level_snr_ceiling_db`) is the clipping
+    /// floor of each level's drive. A measurement at or above its own ceiling says
+    /// nothing about the channel, so it predicts the other level's ceiling.
+    pub fn predict_snr_db(&self, snr_db: f32, from_level: u8, to_level: u8) -> f32 {
+        let lin = |db: f32| 10f32.powf(db / 10.0);
+        let ceiling = &self.ofdm.p.level_snr_ceiling_db;
+        let inv_channel = (1.0 / lin(snr_db) - 1.0 / lin(ceiling[from_level as usize])).max(0.0);
+        let gain = lin(self.level_gain_db(from_level, to_level));
+        10.0 * (1.0 / (inv_channel / gain + 1.0 / lin(ceiling[to_level as usize]))).log10()
     }
 
     /// Data bytes per codeword at `level`.
@@ -188,22 +225,33 @@ impl Modem {
                 symbols.push(m.map_all(chunk));
             }
         }
-        self.ofdm.modulate_with_leader(&symbols, self.txdelay)
+        self.ofdm.modulate_with_leader_rms(&symbols, self.txdelay, self.tx_rms(h.level))
     }
 
-    /// LLRs for every bit slot of `symbols`, using per-carrier noise variance.
-    fn llrs(m: Modulation, symbols: &[Vec<Complex32>], noise_var: &[f32]) -> Vec<f32> {
-        let mut out = Vec::with_capacity(symbols.len() * noise_var.len() * m.bits_per_symbol());
-        for sym in symbols {
-            for (y, &nv) in sym.iter().zip(noise_var) {
-                m.demap_llr(*y, nv, &mut out);
+    /// The header's data-carrier values, one Vec per OFDM symbol, as transmitted.
+    /// Once the header has decoded, the receiver uses them as channel training.
+    fn header_carriers(&self, h: &Header) -> Vec<Vec<Complex32>> {
+        let bpsk = Modulation::Bpsk;
+        let nd = self.ofdm.data_carriers();
+        self.header_bits(h).chunks(nd).map(|c| c.iter().map(|&b| bpsk.map(&[b])).collect()).collect()
+    }
+
+    /// LLRs for every bit slot of symbols `from..` of `f`. The noise variance of
+    /// symbol `i`, carrier `j` is `f.noise_var[j] * f.symbol_noise_scale[i]`.
+    fn llrs(m: Modulation, f: &Frame, from: usize) -> Vec<f32> {
+        let symbols = &f.symbols[from..];
+        let mut out = Vec::with_capacity(symbols.len() * f.noise_var.len() * m.bits_per_symbol());
+        for (sym, &scale) in symbols.iter().zip(&f.symbol_noise_scale[from..]) {
+            for (y, &nv) in sym.iter().zip(&f.noise_var) {
+                m.demap_llr(*y, nv * scale, &mut out);
             }
         }
         out
     }
 
-    fn decode_header(&self, symbols: &[Vec<Complex32>], noise_var: &[f32]) -> Option<Header> {
-        let slots = Self::llrs(Modulation::Bpsk, symbols, noise_var);
+    /// Decode the header from the first `header_symbols()` symbols of `f`.
+    fn decode_header(&self, f: &Frame) -> Option<Header> {
+        let slots = Self::llrs(Modulation::Bpsk, f, 0);
         let llr: Vec<f32> = (0..HDR_CODE_BITS).map(|j| slots[self.hdr_perm[j]]).collect();
         let mut bits = self.hdr_code.decode(&llr, DECODE_ITERS)?;
         for (b, s) in bits.iter_mut().zip(scramble_bits(SEED_HDR_SCRAMBLE, HDR_INFO_BITS)) {
@@ -212,10 +260,11 @@ impl Modem {
         Header::unpack(&vardefm_fec::bits_to_bytes(&bits))
     }
 
-    fn decode_payload(&self, h: &Header, symbols: &[Vec<Complex32>], noise_var: &[f32]) -> Vec<Option<Vec<u8>>> {
+    /// Decode the payload codewords of `f` (a whole frame, header symbols included).
+    fn decode_payload(&self, h: &Header, f: &Frame) -> Vec<Option<Vec<u8>>> {
         let level = LEVELS[h.level as usize];
         let code = &self.codes[h.level as usize];
-        let slots = Self::llrs(level.modulation, symbols, noise_var);
+        let slots = Self::llrs(level.modulation, f, self.hdr_syms);
         let total = h.ncw as usize * CW_BITS;
         let perm = permutation(SEED_INTERLEAVE, total);
         let decode = |j: usize| -> Option<Vec<u8>> {

@@ -12,7 +12,18 @@ Contents: 1. Physical layer · 2. Bursts and error correction · 3. Link layer �
 - OFDM with a cyclic prefix. Carrier *k* (0-based) sits at FFT bin `first_bin + k`.
   The time signal is the real part of a Hermitian-symmetric IFFT, scaled by 1/√N.
 - The TX applies a spectral tilt: carrier gain = `10^(tilt · log2(f_k / f_0) / 20)`.
-- Output is scaled to the mode's RMS level and clipped at ±1.0 (full scale = peak deviation).
+- Each burst is scaled to the TX RMS of its speed level (table below; header-only bursts
+  use level 0's), measured over the whole burst including the leader. Robust levels go
+  out louder: they gain more from the extra deviation than they lose to clipping.
+- Peaks are then limited to ±1.0 (full scale = peak deviation) by clip and filter:
+  1. A 4th-order Butterworth low-pass at 1.15 × the top carrier frequency removes the
+     sidelobes of the symbol edges.
+  2. Twice: what clipping at ±1.0 would remove is low-passed forwards and backwards
+     (zero phase) with the same filter and subtracted.
+  3. A final clamp at ±1.0.
+
+  Power above 1.3 × the top carrier stays more than 30 dB below the in-band power even
+  at RMS 0.55 (plain clipping: about 21 dB).
 
 | Parameter | narrow | wide |
 |---|---|---|
@@ -25,7 +36,8 @@ Contents: 1. Physical layer · 2. Bursts and error correction · 3. Link layer �
 | Pilots / data carriers | 9 / 40 | 12 / 50 |
 | Symbol rate | 41.67 /s | 83.33 /s |
 | TX tilt | 0 dB/oct | +3 dB/oct |
-| TX RMS | 0.25 | 0.30 |
+| TX RMS, levels 0–2 / 3–4 / 5–6 | 0.30 / 0.30 / 0.25 | 0.50 / 0.40 / 0.30 |
+| TX low-pass | 3073 Hz | 6900 Hz |
 
 ### 1.2 Pseudo-random sequences
 All known sequences come from xorshift32 (`x ^= x<<13; x ^= x>>17; x ^= x<<5`). Each
@@ -64,8 +76,14 @@ The reference receiver:
 2. Confirms the frame by cross-correlating with preamble B.
 3. Places the FFT window mid cyclic prefix, which absorbs clock drift of ±ncp/2 samples
    over the frame.
-4. Estimates the channel from preamble B, smoothed across frequency.
+4. Estimates the channel from preamble B, smoothed across frequency, and decodes the
+   header with it. Once the header has decoded, it demodulates the frame again with the
+   header symbols (now known) averaged into the channel estimate, each weighted by the
+   inverse of its noise: the header decodes through a click on one of its symbols, and
+   that symbol must not corrupt the estimate.
 5. Tracks it with pilots averaged over ±4 symbols and interpolated in magnitude and phase.
+6. Estimates the noise per carrier and, from the pilots, a noise scale per symbol, so
+   that a symbol hit by an FM click or a squelch pop gets low-confidence LLRs.
 
 Because the window never moves, a frame should stay shorter than
 `ncp / 2 / (clock error)`. At 100 ppm that is 13 s (narrow) or 6.7 s (wide).
@@ -98,8 +116,9 @@ carries `k/8 − 4` data bytes followed by a big-endian CRC-32.
 
 Net rate = data bytes of a full burst ÷ its airtime (leader, preambles and header
 included), before link-layer overhead. In the FM channel simulator, level 6 decodes
-error-free from about 20 dB carrier-to-noise in narrow mode and 28 dB in wide mode.
-Level 1 decodes from 8 dB (narrow) and 12 dB (wide).
+error-free from about 16.5 dB carrier-to-noise in narrow mode and 24.5 dB in wide mode.
+Level 1 decodes every burst it detects from 4.5 dB (narrow) and 6.5 dB (wide); below
+about 8 dB (narrow) and 11 dB (wide) some bursts are not detected at all.
 
 ### 2.3 Header (96 bits before coding)
 80 bits of fields, MSB first, then a CRC-16/CCITT-FALSE (poly 0x1021, init 0xFFFF) over
@@ -121,20 +140,49 @@ the 10 field bytes.
 ### 2.4 LDPC codes
 Systematic IRA codes: `H = [Hu | Hp]`, where `Hp` is a staircase (check *i* holds parity
 bits *i* and *i−1*). Encoding is a running XOR: `p_i = p_{i−1} ⊕ (Hu row i · u)`. The
-codeword is the information bits followed by the parity bits. `Hu` comes from
-`Ldpc::new(n, k, seed)` (crates/vardefm-fec/src/ldpc.rs):
-1. `m = n − k`; `dv = max(3, ceil(3m/k))`, capped at `m`.
-2. Socket list `s[e] = e mod m` for `e < k·dv`, shuffled by Fisher-Yates driven by
-   xorshift32(seed): `j = next() mod (i+1)` for `i` from `k·dv−1` down to 1.
-3. Information bit *j* joins checks `s[j·dv … j·dv+dv−1]`. Repeated checks within one
-   column are removed by random swaps with the same generator (see code).
+codeword is the information bits followed by the parity bits. `Hu` is built by
+progressive edge growth (PEG) from `(n, k, seed)` (`Ldpc::new` in
+crates/vardefm-fec/src/ldpc.rs). The construction is normative: both ends must build
+identical graphs.
+1. **Degrees.** `m = n − k`. Of the *k* information bits, the last
+   `h = min(⌊(4k + 5m)/20⌋, ⌊k/2⌋)` have degree 8 and the first `k − h` have degree
+   `max(3, ⌈3m/2k⌉)`. Both degrees are capped at *m*.
+2. **Starting graph.** The Tanner graph starts with the staircase edges only: parity
+   bit *p* is in checks *p* and *p+1*, and the last parity bit (*m−1*) only in check
+   *m−1*. A check's degree counts all its edges, parity edges included, so check 0
+   starts at degree 1 and every other check at degree 2.
+3. **Edge growth.** Let `rng` be xorshift32 (section 1.2) seeded with `seed`. For
+   *j* = 0, 1, …, *k−1* in turn, add the *d_j* edges of information bit *j* one at a time.
+   For each edge:
+   - Compute the distance (number of edges) from bit *j* to every check in the
+     current graph. The current graph holds the staircase, every edge added so far
+     and the earlier edges of bit *j* itself.
+   - If some checks cannot be reached from bit *j*, the candidates are those checks.
+     This always applies to a bit's first edge, when all *m* checks are candidates.
+     Otherwise the candidates are the checks at the greatest distance.
+   - Keep the candidates with the lowest current degree, in ascending check order.
+     Connect bit *j* to the one at index `rng.next() mod (number kept)`. Draw exactly
+     one `next()` per edge, also when only one candidate is kept, and add 1 to the
+     chosen check's degree.
 
-| Code | n | k | Seed |
-|---|---|---|---|
-| Header | 400 | 96 | 0x1D9C1000 |
-| Payload | 2400 | 1200 / 1600 / 1800 / 2000 | 0x1D9C0000 + k |
+| Code | n | k | Degree-8 bits | Other bits | Seed |
+|---|---|---|---|---|---|
+| Header | 400 | 96 | 48 | 48 × degree 5 | 0x1D9C1000 |
+| Payload | 2400 | 1200 | 540 | 660 × degree 3 | 0x1D9C04B0 |
+| Payload | 2400 | 1600 | 520 | 1080 × degree 3 | 0x1D9C0640 |
+| Payload | 2400 | 1800 | 510 | 1290 × degree 3 | 0x1D9C0708 |
+| Payload | 2400 | 2000 | 500 | 1500 × degree 3 | 0x1D9C07D0 |
 
-The reference decoder is layered normalized min-sum (α = 0.75, 50 iterations).
+Payload seeds are 0x1D9C0000 + *k*. A hash of each of these graphs is pinned by the
+`construction_is_stable` test in ldpc.rs.
+
+Informative: none of the graphs has a 4-cycle. The header and rate-1/2 graphs have
+girth 8; the denser high-rate graphs have girth 6. Check degrees differ by at most 2
+within a code. The reference decoder is layered offset min-sum: every
+check-to-variable magnitude is `max(0, min − 0.5)`, with no scaling, for at most 50
+iterations, and input LLRs are clamped to ±40. On BPSK/AWGN with it, frame error rate
+1% is reached at Eb/N0 ≈ 1.5 dB (rate 1/2), 2.1 dB (2/3), 2.6 dB (3/4), 3.3 dB (5/6)
+and 2.2 dB (header).
 
 ### 2.5 Scrambling and interleaving
 - Information bits are XORed with xorshift32 bits before encoding. The seed is
@@ -168,7 +216,11 @@ The reference decoder is layered normalized min-sum (α = 0.75, 50 iterations).
   link goes quiet. Either station may then start a burst once the channel has been clear
   for a short random time.
 - **Rate adaptation:** `req_level` is the highest level whose SNR threshold plus 1 dB is
-  at or below the measured SNR. Thresholds: 3.5, 5, 7, 9.5, 12.5, 16.5, 20 dB. After a
+  at or below the predicted SNR at that level. The SNR is measured on a burst sent at the
+  burst's own level. Another level's SNR is predicted from the drive difference and each
+  level's SNR ceiling (the clipping floor of its drive, measured in the simulator):
+  `1/snr = 1/(channel · drive²) + 1/ceiling`. Thresholds (estimated SNR on a burst at that
+  level, levels 0–6): −2, 1.5, 4.5, 7, 11, 15, 18 dB (level 0's is never used). After a
   failed codeword the request drops at least one level below the burst's level. Each
   unanswered burst lowers our own level by one. The called station starts at the level
   it measured on the connect request.

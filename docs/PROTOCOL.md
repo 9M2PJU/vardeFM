@@ -137,20 +137,49 @@ the 10 field bytes.
 ### 2.4 LDPC codes
 Systematic IRA codes: `H = [Hu | Hp]`, where `Hp` is a staircase (check *i* holds parity
 bits *i* and *i−1*). Encoding is a running XOR: `p_i = p_{i−1} ⊕ (Hu row i · u)`. The
-codeword is the information bits followed by the parity bits. `Hu` comes from
-`Ldpc::new(n, k, seed)` (crates/vardefm-fec/src/ldpc.rs):
-1. `m = n − k`; `dv = max(3, ceil(3m/k))`, capped at `m`.
-2. Socket list `s[e] = e mod m` for `e < k·dv`, shuffled by Fisher-Yates driven by
-   xorshift32(seed): `j = next() mod (i+1)` for `i` from `k·dv−1` down to 1.
-3. Information bit *j* joins checks `s[j·dv … j·dv+dv−1]`. Repeated checks within one
-   column are removed by random swaps with the same generator (see code).
+codeword is the information bits followed by the parity bits. `Hu` is built by
+progressive edge growth (PEG) from `(n, k, seed)` (`Ldpc::new` in
+crates/vardefm-fec/src/ldpc.rs). The construction is normative: both ends must build
+identical graphs.
+1. **Degrees.** `m = n − k`. Of the *k* information bits, the last
+   `h = min(⌊(4k + 5m)/20⌋, ⌊k/2⌋)` have degree 8 and the first `k − h` have degree
+   `max(3, ⌈3m/2k⌉)`. Both degrees are capped at *m*.
+2. **Starting graph.** The Tanner graph starts with the staircase edges only: parity
+   bit *p* is in checks *p* and *p+1*, and the last parity bit (*m−1*) only in check
+   *m−1*. A check's degree counts all its edges, parity edges included, so check 0
+   starts at degree 1 and every other check at degree 2.
+3. **Edge growth.** Let `rng` be xorshift32 (section 1.2) seeded with `seed`. For
+   *j* = 0, 1, …, *k−1* in turn, add the *d_j* edges of information bit *j* one at a time.
+   For each edge:
+   - Compute the distance (number of edges) from bit *j* to every check in the
+     current graph. The current graph holds the staircase, every edge added so far
+     and the earlier edges of bit *j* itself.
+   - If some checks cannot be reached from bit *j*, the candidates are those checks.
+     This always applies to a bit's first edge, when all *m* checks are candidates.
+     Otherwise the candidates are the checks at the greatest distance.
+   - Keep the candidates with the lowest current degree, in ascending check order.
+     Connect bit *j* to the one at index `rng.next() mod (number kept)`. Draw exactly
+     one `next()` per edge, also when only one candidate is kept, and add 1 to the
+     chosen check's degree.
 
-| Code | n | k | Seed |
-|---|---|---|---|
-| Header | 400 | 96 | 0x1D9C1000 |
-| Payload | 2400 | 1200 / 1600 / 1800 / 2000 | 0x1D9C0000 + k |
+| Code | n | k | Degree-8 bits | Other bits | Seed |
+|---|---|---|---|---|---|
+| Header | 400 | 96 | 48 | 48 × degree 5 | 0x1D9C1000 |
+| Payload | 2400 | 1200 | 540 | 660 × degree 3 | 0x1D9C04B0 |
+| Payload | 2400 | 1600 | 520 | 1080 × degree 3 | 0x1D9C0640 |
+| Payload | 2400 | 1800 | 510 | 1290 × degree 3 | 0x1D9C0708 |
+| Payload | 2400 | 2000 | 500 | 1500 × degree 3 | 0x1D9C07D0 |
 
-The reference decoder is layered normalized min-sum (α = 0.75, 50 iterations).
+Payload seeds are 0x1D9C0000 + *k*. A hash of each of these graphs is pinned by the
+`construction_is_stable` test in ldpc.rs.
+
+Informative: none of the graphs has a 4-cycle. The header and rate-1/2 graphs have
+girth 8; the denser high-rate graphs have girth 6. Check degrees differ by at most 2
+within a code. The reference decoder is layered offset min-sum: every
+check-to-variable magnitude is `max(0, min − 0.5)`, with no scaling, for at most 50
+iterations, and input LLRs are clamped to ±40. On BPSK/AWGN with it, frame error rate
+1% is reached at Eb/N0 ≈ 1.5 dB (rate 1/2), 2.1 dB (2/3), 2.6 dB (3/4), 3.3 dB (5/6)
+and 2.2 dB (header).
 
 ### 2.5 Scrambling and interleaving
 - Information bits are XORed with xorshift32 bits before encoding. The seed is

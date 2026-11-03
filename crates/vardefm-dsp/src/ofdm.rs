@@ -395,24 +395,26 @@ impl Ofdm {
 
         // Noise per data carrier, interpolated from the pilots, plus the noise of the
         // channel estimate.
-        let noise_var: Vec<f32> = self
+        let raw_var: Vec<f32> = self
             .data_idx
             .iter()
             .map(|&k| {
                 let (m, t) = self.pilot_pos(k);
-                ((pilot_var[m] * (1.0 - t) + pilot_var[m + 1] * t) * (1.0 + est_noise)).max(1e-6)
+                (pilot_var[m] * (1.0 - t) + pilot_var[m + 1] * t) * (1.0 + est_noise)
             })
             .collect();
+        let noise_var: Vec<f32> = raw_var.iter().map(|v| v.max(1e-6)).collect();
         // The reported SNR averages the noise over all symbols, click-hit ones included,
-        // as it did before there was a per-symbol scale.
-        let mean_var = noise_var.iter().sum::<f32>() / noise_var.len() as f32;
+        // as it did before there was a per-symbol scale. Scale the unclamped variance:
+        // on a nearly noiseless frame the floor would otherwise be multiplied too.
+        let mean_var = raw_var.iter().sum::<f32>() / raw_var.len() as f32;
         let mean_scale = scale.iter().sum::<f32>() / nsym.max(1) as f32;
 
         Some(Frame {
             symbols,
             noise_var,
             symbol_noise_scale: scale,
-            snr_db: -10.0 * (mean_var * mean_scale.max(1.0)).log10(),
+            snr_db: -10.0 * (mean_var * mean_scale.max(1.0)).max(1e-6).log10(),
             end: (base + (nsym as isize + 1) * l + n as isize) as usize,
         })
     }

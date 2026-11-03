@@ -35,7 +35,14 @@ use vardefm_modem::{Burst, Header, Kind, Modem, RxBurst, FLAG_POLL, LEVELS};
 /// which that level decodes reliably in the FM channel simulator (see the
 /// `level_table` benchmark). Each level has its own transmit drive, so a burst
 /// measured at one level is normalized to the drive of another before comparing.
-pub const SNR_THRESHOLDS_DB: [f32; 7] = [3.5, 4.0, 5.0, 9.0, 11.5, 15.5, 18.5];
+///
+/// Each value is the highest SNR of any burst at that level with a failed codeword,
+/// or the lowest SNR from which every burst decoded fully if higher, rounded up to
+/// 0.5 dB, in the worse of the two modes. So with the margin, a level is only
+/// requested at least 1 dB above every failure seen. Below about 10 dB the SNR
+/// estimate falls fast with CNR (FM threshold), so the low levels' values are small
+/// or negative; level 0's is never used.
+pub const SNR_THRESHOLDS_DB: [f32; 7] = [-2.0, 1.5, 4.5, 7.0, 11.0, 15.0, 18.0];
 const SNR_MARGIN_DB: f32 = 1.0;
 
 /// Highest level whose threshold (plus margin) the SNR would reach, given `snr_db`

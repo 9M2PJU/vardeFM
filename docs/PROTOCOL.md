@@ -114,8 +114,9 @@ carries `k/8 − 4` data bytes followed by a big-endian CRC-32.
 
 Net rate = data bytes of a full burst ÷ its airtime (leader, preambles and header
 included), before link-layer overhead. In the FM channel simulator, level 6 decodes
-error-free from about 20 dB carrier-to-noise in narrow mode and 28 dB in wide mode.
-Level 1 decodes from 8 dB (narrow) and 10 dB (wide).
+error-free from about 16.5 dB carrier-to-noise in narrow mode and 24.5 dB in wide mode.
+Level 1 decodes every burst it detects from 4.5 dB (narrow) and 6.5 dB (wide); below
+about 8 dB (narrow) and 11 dB (wide) some bursts are not detected at all.
 
 ### 2.3 Header (96 bits before coding)
 80 bits of fields, MSB first, then a CRC-16/CCITT-FALSE (poly 0x1021, init 0xFFFF) over
@@ -216,7 +217,7 @@ and 2.2 dB (header).
   at or below the predicted SNR at that level. The SNR is measured on a burst sent at the
   burst's own level; a level with a different TX RMS is predicted to change it by
   20·log10(RMS_candidate / RMS_received) dB. Thresholds (estimated SNR on a burst at that
-  level, levels 0–6): 3.5, 4, 5, 9, 11.5, 15.5, 18.5 dB. After a
+  level, levels 0–6): −2, 1.5, 4.5, 7, 11, 15, 18 dB (level 0's is never used). After a
   failed codeword the request drops at least one level below the burst's level. Each
   unanswered burst lowers our own level by one. The called station starts at the level
   it measured on the connect request.

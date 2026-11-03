@@ -83,10 +83,19 @@ impl Modem {
             assert_eq!(CW_BITS % (nd * l.modulation.bits_per_symbol()), 0);
         }
         assert_eq!(ofdm.p.level_tx_rms.len(), LEVELS.len());
+        // Levels share codes (k = 1200 three times, 1800 twice): build each once.
+        let mut codes: Vec<Ldpc> = Vec::with_capacity(LEVELS.len());
+        for l in &LEVELS {
+            let code = match codes.iter().find(|c| c.k == l.k) {
+                Some(c) => c.clone(),
+                None => Ldpc::new(CW_BITS, l.k, SEED_CODE + l.k as u32),
+            };
+            codes.push(code);
+        }
         Self {
             hdr_syms: HDR_CODE_BITS / nd,
             hdr_code: Ldpc::new(HDR_CODE_BITS, HDR_INFO_BITS, SEED_HDR_CODE),
-            codes: LEVELS.iter().map(|l| Ldpc::new(CW_BITS, l.k, SEED_CODE + l.k as u32)).collect(),
+            codes,
             hdr_perm: permutation(SEED_HDR_INTERLEAVE, HDR_CODE_BITS),
             ofdm,
             txdelay,

@@ -316,6 +316,7 @@ impl Ofdm {
     }
 
     /// Demodulate `nsym` data symbols of a frame whose preamble B starts at `b_start`.
+    /// Returns `None` if `nsym` is 0 or the frame runs past the end of `rx`.
     pub fn demodulate(&self, rx: &[f32], b_start: usize, nsym: usize) -> Option<Frame> {
         self.demodulate_known(rx, b_start, nsym, &[])
     }
@@ -324,6 +325,9 @@ impl Ofdm {
     /// `known.len()` symbols are known (for example a header that has already been
     /// decoded). Those symbols train the channel estimate together with preamble B.
     pub fn demodulate_known(&self, rx: &[f32], b_start: usize, nsym: usize, known: &[Vec<Complex32>]) -> Option<Frame> {
+        if nsym == 0 {
+            return None;
+        }
         let n = self.p.nfft;
         let l = self.p.symbol_len() as isize;
         let nc = self.p.num_carriers;
@@ -560,6 +564,8 @@ mod tests {
         }
         assert_eq!(out, bits);
         assert!(frame.snr_db > 30.0, "snr {}", frame.snr_db);
+        // No symbols is not a frame (the noise model would have no pilots to fit).
+        assert!(ofdm.demodulate(&rx, b, 0).is_none());
     }
 
     #[test]

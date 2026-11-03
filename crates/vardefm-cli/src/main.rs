@@ -27,7 +27,7 @@ struct ModemArgs {
     #[arg(long = "mod", default_value = "qpsk")]
     modulation: String,
     /// Data symbols per frame
-    #[arg(long, default_value_t = 40)]
+    #[arg(long, default_value_t = 40, value_parser = at_least_one)]
     symbols: usize,
     /// TX spectral tilt in dB/octave (negative tilts down the high carriers)
     #[arg(long)]
@@ -455,5 +455,14 @@ fn main() {
             }
             println!("{} frames decoded", frames.len());
         }
+    }
+}
+
+/// Parses a count that must be at least 1.
+fn at_least_one(s: &str) -> Result<usize, String> {
+    match s.parse::<usize>() {
+        Ok(n) if n >= 1 => Ok(n),
+        Ok(_) => Err("must be at least 1".into()),
+        Err(e) => Err(e.to_string()),
     }
 }

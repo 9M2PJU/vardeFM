@@ -7,9 +7,15 @@
 //! Ordering across the two sockets: a host that writes data and then sends
 //! `DISCONNECT` expects that data to be sent. The two sockets are read by
 //! different threads, so the command could overtake the data. To prevent that,
-//! the command reader holds `DISCONNECT` back until the data reader has found
-//! its socket empty at some point after the command arrived. Everything written
-//! before the command is then already in the inbox, ahead of it.
+//! the command reader holds `DISCONNECT` back until a read of the data socket
+//! that began [`DRAIN_QUIET`] after the command arrived has found it empty.
+//! Everything written before the command is then in the inbox, ahead of it.
+//!
+//! The quiet time covers data that the host has written but that is still on
+//! its side of the connection: a host that writes more than the socket buffers
+//! hold has to wait for the data reader to make room, and on a busy computer
+//! the rest can take a few milliseconds to follow. Two TCP connections give no
+//! ordering guarantee, so this makes the race unlikely, not impossible.
 
 use std::io::{self, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
@@ -33,6 +39,8 @@ type Slot = Arc<Mutex<Option<TcpStream>>>;
 
 /// How often the data reader checks for an empty socket.
 const DATA_POLL: Duration = Duration::from_millis(5);
+/// How long after DISCONNECT the data socket must still be found empty.
+const DRAIN_QUIET: Duration = Duration::from_millis(50);
 /// Longest a DISCONNECT is held back waiting for the data reader.
 const SYNC_LIMIT: Duration = Duration::from_millis(500);
 
@@ -50,12 +58,13 @@ impl DataSync {
         self.epoch.elapsed().as_micros() as u64
     }
 
-    /// Wait until the data reader has drained its socket after this call began.
+    /// Wait until a read that began [`DRAIN_QUIET`] after this call has found the
+    /// data socket empty.
     fn wait_drained(&self) {
         if !self.connected.load(Ordering::Acquire) {
             return;
         }
-        let t = self.now_us();
+        let t = self.now_us() + DRAIN_QUIET.as_micros() as u64;
         let start = Instant::now();
         while self.empty_at.load(Ordering::Acquire) <= t && start.elapsed() < SYNC_LIMIT {
             thread::sleep(Duration::from_millis(1));
@@ -181,6 +190,11 @@ fn data_loop(mut stream: TcpStream, tx: Sender<HostIn>, slot: Slot, sync: Arc<Da
     let _ = stream.set_read_timeout(Some(DATA_POLL));
     let mut buf = [0u8; 8192];
     loop {
+        // Taken before the read: a read that times out proves the socket was empty
+        // from this moment on. A time taken after the timeout could be later than
+        // data that arrived while this thread was not running, and the command
+        // reader would then let DISCONNECT overtake that data.
+        let read_started = sync.now_us();
         match stream.read(&mut buf) {
             Ok(0) => break,
             Ok(n) => {
@@ -189,8 +203,8 @@ fn data_loop(mut stream: TcpStream, tx: Sender<HostIn>, slot: Slot, sync: Arc<Da
                 }
             }
             Err(e) if matches!(e.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut) => {
-                // Socket empty: everything written so far is in the inbox.
-                sync.empty_at.store(sync.now_us(), Ordering::Release);
+                // Socket empty: everything written before `read_started` is in the inbox.
+                sync.empty_at.store(read_started, Ordering::Release);
             }
             Err(_) => break,
         }

@@ -19,6 +19,15 @@ run the same minor version.
 - `docs/RADIO.md` covers USB sound dongles that key the radio by VOX, and how the VOX
   hang time eats into the other station's leader.
 
+### Fixed
+- **DISCONNECT could overtake data** that the host wrote just before it, on a busy
+  computer. The data port reader timed its "socket empty" mark after the read had timed
+  out, so a pause of the reader thread could make data that arrived meanwhile count as
+  already delivered. The mark now uses the time the read began. DISCONNECT also waits until
+  the data socket is still empty 50 ms after the command, which covers data that has not
+  yet left the host when the host writes more than the socket buffers hold. Under heavy
+  CPU load the server test failed 3 times in 30 before and 0 times in 150 after.
+
 ## [0.3.0] - 2026-11-03
 
 **Not on-air compatible with 0.2.x.** The LDPC codes, the per-level transmit drive and the

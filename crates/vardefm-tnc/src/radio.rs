@@ -9,6 +9,7 @@
 //! [`RadioEngine`] holds that logic with the sound card output and PTT behind
 //! traits, so it can be tested without hardware; [`run`] wires it to real devices.
 
+use crate::level::{meter_line, LevelMeter, Verdict};
 use crate::server::{HostIn, HostPort};
 use crate::station::{HostOut, Station};
 use std::io;
@@ -18,7 +19,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use vardefm_audio::{open_input, open_output, AudioOut, Channel, RATE};
 use vardefm_link::LinkConfig;
-use vardefm_modem::{Modem, OfdmParams, LEVELS};
+use vardefm_modem::{AudioLevel, Modem, OfdmParams, LEVELS};
 use vardefm_ptt::{Ptt, PttSpec};
 
 #[derive(Clone, Debug)]
@@ -43,7 +44,14 @@ pub struct RadioConfig {
     /// Highest speed level to send or request (limits the decoding load on slow computers).
     pub max_level: u8,
     pub verbose: bool,
+    /// Print the receive level every [`LEVEL_WINDOW_S`] seconds while idle.
+    pub show_levels: bool,
 }
+
+/// Seconds per line of `--levels` output.
+pub const LEVEL_WINDOW_S: f32 = 2.0;
+/// Shortest time between two level warnings.
+const LEVEL_WARN_EVERY_S: f64 = 30.0;
 
 impl Default for RadioConfig {
     fn default() -> Self {
@@ -62,6 +70,7 @@ impl Default for RadioConfig {
             record: None,
             max_level: LEVELS.len() as u8 - 1,
             verbose: true,
+            show_levels: false,
         }
     }
 }
@@ -114,6 +123,13 @@ pub struct RadioEngine<S: AudioSink> {
     pub record: Option<PathBuf>,
     /// Log lines (one per burst sent or received), drained by the caller.
     pub log: Vec<String>,
+    /// Lines to show even when the log is quiet (level meter and warnings).
+    pub notices: Vec<String>,
+    /// Put a receive level line in `notices` every [`LEVEL_WINDOW_S`] seconds while idle.
+    pub show_levels: bool,
+    meter: LevelMeter,
+    /// When the last level warning went out.
+    last_level_warning: Option<f64>,
 }
 
 impl<S: AudioSink> RadioEngine<S> {
@@ -129,7 +145,28 @@ impl<S: AudioSink> RadioEngine<S> {
             tx_count: 0,
             record: None,
             log: Vec::new(),
+            notices: Vec::new(),
+            show_levels: false,
+            meter: LevelMeter::new((LEVEL_WINDOW_S * RATE as f32) as usize),
+            last_level_warning: None,
         }
+    }
+
+    /// Warn about a bad receive level, at most every [`LEVEL_WARN_EVERY_S`] seconds.
+    fn level_warning(&mut self, now: f64, what: &str, level: AudioLevel) {
+        let verdict = Verdict::of(level);
+        if !matches!(verdict, Verdict::Clipping | Verdict::Loud | Verdict::Quiet) {
+            return;
+        }
+        if self.last_level_warning.is_some_and(|t| now - t < LEVEL_WARN_EVERY_S) {
+            return;
+        }
+        self.last_level_warning = Some(now);
+        self.notices.push(format!(
+            "{now:8.2}s {what} peaks at {:.1} dBFS: {} (aim for about -6 dBFS)",
+            level.peak_dbfs,
+            verdict.advice()
+        ));
     }
 
     pub fn now(&self) -> f64 {
@@ -177,11 +214,21 @@ impl<S: AudioSink> RadioEngine<S> {
                 for b in self.station.rx_audio(now, c) {
                     let ok = b.payload.iter().filter(|p| p.is_some()).count();
                     self.log.push(format!(
-                        "{now:8.2}s rx {:<10} cw {ok:>2}/{:<2} SNR {:5.1} dB",
+                        "{now:8.2}s rx {:<10} cw {ok:>2}/{:<2} SNR {:5.1} dB  peak {:5.1} dBFS",
                         format!("{:?}", b.header.kind),
                         b.header.ncw,
-                        b.snr_db
+                        b.snr_db,
+                        b.level.peak_dbfs
                     ));
+                    self.level_warning(now, "received burst", b.level);
+                }
+                if let Some(level) = self.meter.push(c) {
+                    if self.show_levels {
+                        self.notices.push(format!("{now:8.2}s {}", meter_line(level)));
+                    } else if Verdict::of(level) == Verdict::Clipping {
+                        // Noise or voice that clips will clip our bursts too.
+                        self.level_warning(now, "receive audio", level);
+                    }
                 }
             }
             if let Some(t) = self.station.poll_tx(now) {
@@ -196,6 +243,7 @@ impl<S: AudioSink> RadioEngine<S> {
                     t.info.retry,
                     t.seconds
                 ));
+                self.meter.reset();
                 // Key first, then queue the audio: the leader covers the radio's key-up time.
                 if let Err(e) = self.ptt.set(true) {
                     self.log.push(format!("{now:8.2}s PTT on failed: {e}"));
@@ -240,8 +288,13 @@ pub fn run(cfg: RadioConfig, stop: Arc<AtomicBool>) -> io::Result<()> {
     }
     println!("  host     : command {}, data {}", port.cmd_addr, port.data_addr);
 
+    if cfg.show_levels {
+        println!("  levels   : every {LEVEL_WINDOW_S} s while idle; set the radio volume so bursts peak near -6 dBFS");
+    }
+
     let mut engine = RadioEngine::new(modem, link, ptt, output, cfg.txtail_s, std::process::id());
     engine.tx_gain = cfg.tx_gain;
+    engine.show_levels = cfg.show_levels;
     engine.record = cfg.record.clone();
     while !stop.load(Ordering::Relaxed) {
         let chunk = input.rx.recv_timeout(Duration::from_millis(50)).ok();
@@ -256,6 +309,9 @@ pub fn run(cfg: RadioConfig, stop: Arc<AtomicBool>) -> io::Result<()> {
             if cfg.verbose || l.contains("failed") || l.contains("watchdog") {
                 println!("{l}");
             }
+        }
+        for l in engine.notices.drain(..) {
+            println!("{l}");
         }
     }
     engine.unkey();

@@ -13,7 +13,8 @@ transmitter (PTT). `vardefm modem` then offers the VARA-compatible TCP ports
 | Interface with a USB serial port keying on RTS or DTR (e.g. Digirig) | `rts:COM5` / `dtr:COM5` (`/dev/ttyUSB0` on Linux, `/dev/cu.usbserial-…` on macOS); prefix `-` to invert |
 | Radio keyed over CAT by Hamlib | `rigctld` or `rigctld:<host>:<port>` (start `rigctld` first) |
 | Raspberry Pi (or other Linux board) with PTT wired to a header pin, e.g. a radio HAT | `gpio:<pin>` (BCM number: `gpio:17` = header pin 11), `gpio:<chip>:<line>`; prefix `-` to invert |
-| VOX (e.g. SignaLink), or the host application keys the radio | `none` |
+| VOX: the interface keys the radio when it hears audio (SignaLink, and cheap USB sound dongles sold as radio interfaces that have no COM port, such as GeneralPlus `1b3f:2008`) | `vox` (same as `none`) |
+| The host application keys the radio | `none` |
 
 CM108-family devices are recognised by USB ID: C-Media `0d8c:0008`–`000f`,
 `0012`, `0013`, `0139`, `013a`, `013c`; SSS1621/1623 `0c76:1605/1607/160b`; AIOC
@@ -77,10 +78,17 @@ your user needs to be in group `gpio` (the default user already is):
 4. **Set the receive level.** Let another station transmit (or play
    `tx-wav` audio from a second radio). Adjust the input level so peaks sit
    around −6 dBFS and never reach 0 dBFS. `monitor` also decodes VardeFM bursts
-   and shows their SNR.
+   and shows their SNR and peak level, with advice (`ok`, `loud: turn the
+   radio volume down a little`, `quiet: turn the radio volume up`, ...).
    ```powershell
    .\vardefm monitor --audio-in "USB Audio"
    ```
+   On radios where the sound card takes the speaker audio, the volume knob sets
+   this level, so leave it alone once it is right. `vardefm modem --levels` shows
+   the same meter every 2 s while the modem is idle, and the modem always shows
+   each received burst's peak level. With or without `--levels`, the modem warns
+   (at most every 30 s) when received bursts are too loud or too quiet, or when
+   any received audio clips.
    Open the squelch slightly or set it low: VardeFM detects frames by itself.
    Squelch tail noise is fine.
 
@@ -100,6 +108,16 @@ your user needs to be in group `gpio` (the default user already is):
 | `--txtail` | 0.05 s | PTT held after the last sample has left the sound card. |
 
 If the other station's log shows frames missing their start, raise `--txdelay`.
+
+**VOX.** With `--ptt vox` the leader is audio, so it also triggers the VOX. The
+problem is the end of a burst: the interface keeps the radio keyed for its hang
+time after the audio stops, and VardeFM cannot see this. The other station starts
+its answer 0.2 s after our burst ends, after its own `--txdelay` leader, so with
+the defaults the first 0.35 s are leader. A VOX hang shorter than about 0.3 s is
+fine. With a longer hang we miss the start of every answer: turn the hang time
+down if the interface has a trimmer, or ask the other station to raise its
+`--txdelay` above our hang time. `vardefm ptt-test` does nothing with VOX; use
+`vardefm tone` to check that the radio keys.
 A watchdog unkeys the radio if a transmission runs 3 s past its expected length.
 
 ## 4. Slow computers (Raspberry Pi)

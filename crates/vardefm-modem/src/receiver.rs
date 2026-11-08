@@ -1,12 +1,8 @@
 //! Streaming receiver: feed audio in chunks, get decoded bursts out.
 
+use crate::busy::BusyDetector;
 use crate::{Header, Modem, LEVELS};
 use std::sync::Arc;
-
-/// Squelch-open threshold for the BUSY indication (RMS, full scale = 1).
-const BUSY_RMS: f32 = 0.01;
-/// How long the channel stays busy after the last loud chunk.
-const BUSY_HOLD_S: f32 = 0.15;
 
 /// A received burst.
 #[derive(Clone, Debug)]
@@ -51,13 +47,14 @@ pub struct Receiver {
     search: usize,
     /// A frame whose header decoded but whose payload has not fully arrived: (preamble-B index, header).
     pending: Option<(usize, Header)>,
-    /// Samples since the channel was last loud.
-    quiet_samples: usize,
+    /// Whether something louder than the background is heard.
+    detector: BusyDetector,
 }
 
 impl Receiver {
     pub fn new(modem: Arc<Modem>) -> Self {
-        Self { modem, buf: Vec::new(), base: 0, search: 0, pending: None, quiet_samples: usize::MAX / 2 }
+        let detector = BusyDetector::new(modem.fs());
+        Self { modem, buf: Vec::new(), base: 0, search: 0, pending: None, detector }
     }
 
     /// Absolute index of the next sample to be pushed.
@@ -65,9 +62,10 @@ impl Receiver {
         self.base + self.buf.len() as u64
     }
 
-    /// True while a signal is heard (squelch open) or a frame is being received.
+    /// True while a signal louder than the background is heard (a steady
+    /// open-squelch hiss does not count) or a frame is being received.
     pub fn busy(&self) -> bool {
-        self.pending.is_some() || (self.quiet_samples as f32) < BUSY_HOLD_S * self.modem.fs()
+        self.pending.is_some() || self.detector.busy()
     }
 
     /// Drop all buffered audio (e.g. when our own transmitter keys up).
@@ -79,12 +77,7 @@ impl Receiver {
     }
 
     pub fn push(&mut self, samples: &[f32]) -> Vec<RxBurst> {
-        let ms = samples.iter().map(|x| x * x).sum::<f32>() / samples.len().max(1) as f32;
-        if ms.sqrt() > BUSY_RMS {
-            self.quiet_samples = 0;
-        } else {
-            self.quiet_samples += samples.len();
-        }
+        self.detector.push(samples);
         self.buf.extend_from_slice(samples);
         let mut out = Vec::new();
         while let Some(progress) = self.step(&mut out) {

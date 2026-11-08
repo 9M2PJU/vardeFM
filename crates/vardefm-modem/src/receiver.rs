@@ -102,6 +102,17 @@ impl Receiver {
         b - p.ncp / 2 + (nsym + 1) * p.symbol_len() + p.nfft
     }
 
+    /// Level of the burst whose preamble B body starts at `b`, from the start of
+    /// preamble A to the end of its last data symbol. `Frame::end` lies about a
+    /// symbol later (the receiver's look-ahead), where a squelch tail could land.
+    fn burst_level(&self, b: usize, nsym: usize) -> AudioLevel {
+        let p = &self.modem.ofdm.p;
+        let l = p.symbol_len();
+        let start = b.saturating_sub(p.ncp + l);
+        let end = (b + p.nfft + nsym * l).min(self.buf.len());
+        AudioLevel::of(&self.buf[start.min(end)..end])
+    }
+
     /// One processing step. Returns Some(true) if something changed and we should go again.
     fn step(&mut self, out: &mut Vec<RxBurst>) -> Option<bool> {
         let m = &self.modem;
@@ -120,7 +131,7 @@ impl Receiver {
                 return Some(true);
             };
             let payload = m.decode_payload(&h, &frame);
-            let level = AudioLevel::of(&self.buf[b..frame.end.min(self.buf.len())]);
+            let level = self.burst_level(b, nsym);
             out.push(RxBurst {
                 header: h,
                 payload,
@@ -155,7 +166,7 @@ impl Receiver {
                             payload: Vec::new(),
                             snr_db,
                             end_sample: self.base + f.end as u64,
-                            level: AudioLevel::of(&self.buf[b..f.end.min(self.buf.len())]),
+                            level: self.burst_level(b, hdr_syms),
                         });
                         self.search = f.end.min(self.buf.len());
                     }

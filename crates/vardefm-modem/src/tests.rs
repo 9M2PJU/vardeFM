@@ -291,3 +291,25 @@ fn survives_a_click_in_the_header() {
     assert_eq!(got[0].header, b.header);
     assert!(got[0].payload.iter().all(|p| p.is_some()));
 }
+
+#[test]
+fn burst_level_ignores_a_squelch_pop_after_the_burst() {
+    let m = modem("narrow");
+    let mut ack = burst(0, 0, 7);
+    ack.header.kind = Kind::DiscAck;
+    for b in [burst(2, 2, 6), ack] {
+        // The burst at -6 dB, then a full-scale pop right after its last symbol.
+        let tx: Vec<f32> = m.modulate(&b).iter().map(|x| x * 0.5).collect();
+        let expected = AudioLevel::of(&tx);
+        let mut audio = vec![0.0; 3000];
+        audio.extend(&tx);
+        audio.extend(vec![0.0; 100]);
+        audio.extend(vec![1.0; 200]);
+        let got = receive(&mut Receiver::new(m.clone()), &audio);
+        assert_eq!(got.len(), 1);
+        let level = got[0].level;
+        assert!(level.peak_dbfs < -5.0, "pop counted: {level:?}");
+        // The whole burst is measured (preamble A included): its peak is the burst's own.
+        assert!((level.peak_dbfs - expected.peak_dbfs).abs() < 0.5, "{level:?} vs {expected:?}");
+    }
+}

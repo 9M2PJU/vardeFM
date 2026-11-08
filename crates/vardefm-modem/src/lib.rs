@@ -10,7 +10,7 @@ mod header;
 mod receiver;
 
 pub use header::{Header, Kind, FLAG_POLL};
-pub use receiver::{Receiver, RxBurst};
+pub use receiver::{AudioLevel, Receiver, RxBurst};
 pub use vardefm_dsp::OfdmParams;
 
 use vardefm_dsp::{Complex32, Frame, Modulation, Ofdm};

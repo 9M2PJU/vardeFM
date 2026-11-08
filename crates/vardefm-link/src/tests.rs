@@ -106,7 +106,7 @@ impl Net {
                 .iter()
                 .map(|cw| if self.chance(self.cw_loss) { None } else { Some(cw.clone()) })
                 .collect();
-            let rx = RxBurst { header: burst.header, payload, snr_db: 30.0, end_sample: 0 };
+            let rx = RxBurst { header: burst.header, payload, snr_db: 30.0, end_sample: 0, level: Default::default() };
             self.nodes[to].link.on_burst(now, &rx);
         }
         // Poll for new transmissions.

@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 use vardefm_audio::{open_input, open_output, Channel, RATE};
 use vardefm_modem::{Modem, OfdmParams, Receiver, RxBurst, LEVELS};
 use vardefm_ptt::PttSpec;
+use vardefm_tnc::level::{meter_line, LevelMeter, Verdict};
 
 type Res = Result<(), String>;
 
@@ -57,6 +58,11 @@ pub fn devices() -> Res {
 
 pub fn ptt_test(spec: &str, seconds: f32) -> Res {
     let spec: PttSpec = spec.parse()?;
+    if spec == PttSpec::None {
+        return Err("with --ptt vox nothing is keyed by VardeFM: the interface keys the radio when it hears \
+                    audio. Test it with `vardefm tone --audio-out <device> --seconds 2`."
+            .into());
+    }
     let stop = stop_flag();
     let mut ptt = vardefm_ptt::open(&spec).map_err(e)?;
     println!("Keying {} for {seconds} s (Ctrl-C to stop early)...", ptt.describe());
@@ -103,12 +109,14 @@ fn print_burst(t: f64, b: &RxBurst) {
     let ok = b.payload.iter().filter(|p| p.is_some()).count();
     let level = if h.ncw > 0 { LEVELS[h.level as usize].name } else { "-" };
     println!(
-        "{t:8.2}s burst {:<10} session {:02x} {:<9} cw {ok}/{}  SNR {:.1} dB",
+        "{t:8.2}s burst {:<10} session {:02x} {:<9} cw {ok}/{}  SNR {:.1} dB  peak {:.1} dBFS ({})",
         format!("{:?}", h.kind),
         h.session,
         level,
         h.ncw,
-        b.snr_db
+        b.snr_db,
+        b.level.peak_dbfs,
+        Verdict::of(b.level).advice()
     );
 }
 
@@ -120,24 +128,16 @@ pub fn monitor(audio_in: Option<&str>, channel: Channel, mode: &str) -> Res {
     let stop = stop_flag();
     println!("Listening on '{}' ({} Hz). Ctrl-C to stop.", input.name, input.device_rate);
     println!("Aim for received modem audio peaks around -6 dBFS, never at 0 dBFS (clipping).");
-    let (mut pos, mut sq, mut peak, mut n) = (0u64, 0f64, 0f32, 0usize);
+    let mut meter = LevelMeter::new(RATE as usize / 2);
+    let mut pos = 0u64;
     while !stop.load(Ordering::Relaxed) {
         let Ok(chunk) = input.rx.recv_timeout(Duration::from_millis(200)) else { continue };
-        for &x in &chunk {
-            sq += (x * x) as f64;
-            peak = peak.max(x.abs());
-        }
-        n += chunk.len();
         pos += chunk.len() as u64;
         for b in rx.push(&chunk) {
             print_burst(pos as f64 / RATE as f64, &b);
         }
-        if n >= RATE as usize / 2 {
-            let rms_db = 10.0 * (sq / n as f64).max(1e-12).log10();
-            let peak_db = 20.0 * peak.max(1e-6).log10();
-            let bar = "#".repeat(((rms_db + 60.0).max(0.0) / 2.0) as usize);
-            println!("{:8.2}s level {rms_db:6.1} dBFS rms {peak_db:6.1} dBFS peak |{bar}", pos as f64 / RATE as f64);
-            (sq, peak, n) = (0.0, 0.0, 0);
+        if let Some(level) = meter.push(&chunk) {
+            println!("{:8.2}s {}", pos as f64 / RATE as f64, meter_line(level));
         }
     }
     Ok(())

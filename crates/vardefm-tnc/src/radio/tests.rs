@@ -211,3 +211,54 @@ fn watchdog_unkeys_a_stuck_sound_card() {
     }
     panic!("never unkeyed");
 }
+
+/// Station A calls; B hears A's audio scaled by `gain` and clipped at full scale.
+fn hear_a_call(gain: f32) -> RadioEngine<FakeOut> {
+    let cards: [Shared; 2] = [Arc::default(), Arc::default()];
+    let mut a = engine(&cards[0], 4);
+    let mut b = engine(&cards[1], 5);
+    let mut a_in = vec![HostIn::Line("MYCALL LA1AAA".into()), HostIn::Line("CONNECT LA1AAA LA2BBB".into())];
+    let mut air = vec![0.0f32; CHUNK];
+    for _ in 0..300 {
+        a.step(Some(&vec![0.0; CHUNK]), std::mem::take(&mut a_in));
+        let heard: Vec<f32> = air.iter().map(|x| (x * gain).clamp(-1.0, 1.0)).collect();
+        b.step(Some(&heard), Vec::new());
+        air = cards[0].lock().unwrap().tick();
+        if b.log.iter().any(|l| l.contains(" rx ")) {
+            break;
+        }
+    }
+    b
+}
+
+#[test]
+fn clipped_bursts_are_reported() {
+    let b = hear_a_call(4.0);
+    let rx = b.log.iter().find(|l| l.contains(" rx ")).expect("B heard nothing");
+    assert!(rx.contains("dBFS"), "{rx}");
+    assert!(b.notices.iter().any(|l| l.contains("clipping")), "{:?}", b.notices);
+}
+
+#[test]
+fn good_bursts_are_not_reported() {
+    // Our own bursts peak at full scale; 6 dB down is the target.
+    let b = hear_a_call(0.5);
+    assert!(b.log.iter().any(|l| l.contains(" rx ")), "B heard nothing");
+    assert!(b.notices.is_empty(), "{:?}", b.notices);
+}
+
+#[test]
+fn level_lines_only_when_asked() {
+    let card: Shared = Arc::default();
+    let noise: Vec<f32> = (0..CHUNK).map(|i| 0.05 * ((i * 7919) % 200) as f32 / 100.0 - 0.05).collect();
+    for show in [false, true] {
+        let mut eng = engine(&card, 6);
+        eng.show_levels = show;
+        for _ in 0..500 {
+            eng.step(Some(&noise), Vec::new());
+        }
+        // 5 s of audio, one line per 2 s.
+        let lines = eng.notices.iter().filter(|l| l.contains("dBFS rms")).count();
+        assert_eq!(lines, if show { 2 } else { 0 }, "{:?}", eng.notices);
+    }
+}

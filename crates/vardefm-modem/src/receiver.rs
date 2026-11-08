@@ -18,6 +18,28 @@ pub struct RxBurst {
     pub snr_db: f32,
     /// Absolute sample index (since the receiver was created) where the burst ended.
     pub end_sample: u64,
+    /// Received audio level over the burst, dB relative to full scale.
+    pub level: AudioLevel,
+}
+
+/// RMS and peak level of a stretch of audio, dB relative to full scale.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct AudioLevel {
+    pub rms_dbfs: f32,
+    pub peak_dbfs: f32,
+}
+
+impl AudioLevel {
+    /// Level of `samples` (silence reads -120 dBFS).
+    pub fn of(samples: &[f32]) -> Self {
+        let (mut sq, mut peak) = (0f64, 0f32);
+        for &x in samples {
+            sq += (x * x) as f64;
+            peak = peak.max(x.abs());
+        }
+        let ms = sq / samples.len().max(1) as f64;
+        Self { rms_dbfs: (10.0 * ms.max(1e-12).log10()) as f32, peak_dbfs: 20.0 * peak.max(1e-6).log10() }
+    }
 }
 
 pub struct Receiver {
@@ -80,6 +102,17 @@ impl Receiver {
         b - p.ncp / 2 + (nsym + 1) * p.symbol_len() + p.nfft
     }
 
+    /// Level of the burst whose preamble B body starts at `b`, from the start of
+    /// preamble A to the end of its last data symbol. `Frame::end` lies about a
+    /// symbol later (the receiver's look-ahead), where a squelch tail could land.
+    fn burst_level(&self, b: usize, nsym: usize) -> AudioLevel {
+        let p = &self.modem.ofdm.p;
+        let l = p.symbol_len();
+        let start = b.saturating_sub(p.ncp + l);
+        let end = (b + p.nfft + nsym * l).min(self.buf.len());
+        AudioLevel::of(&self.buf[start.min(end)..end])
+    }
+
     /// One processing step. Returns Some(true) if something changed and we should go again.
     fn step(&mut self, out: &mut Vec<RxBurst>) -> Option<bool> {
         let m = &self.modem;
@@ -98,7 +131,14 @@ impl Receiver {
                 return Some(true);
             };
             let payload = m.decode_payload(&h, &frame);
-            out.push(RxBurst { header: h, payload, snr_db: frame.snr_db, end_sample: self.base + frame.end as u64 });
+            let level = self.burst_level(b, nsym);
+            out.push(RxBurst {
+                header: h,
+                payload,
+                snr_db: frame.snr_db,
+                end_sample: self.base + frame.end as u64,
+                level,
+            });
             self.search = frame.end.min(self.buf.len());
             return Some(true);
         }
@@ -126,6 +166,7 @@ impl Receiver {
                             payload: Vec::new(),
                             snr_db,
                             end_sample: self.base + f.end as u64,
+                            level: self.burst_level(b, hdr_syms),
                         });
                         self.search = f.end.min(self.buf.len());
                     }

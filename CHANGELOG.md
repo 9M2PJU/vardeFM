@@ -4,6 +4,21 @@ All notable changes to VardeFM. The format follows [Keep a Changelog](https://ke
 Until 1.0 a minor version bump (0.x) means the on-air protocol changed: both stations must
 run the same minor version.
 
+## [Unreleased]
+
+### Added
+- **Receive level advice.** `vardefm modem --levels` prints the receive level every 2 s
+  while idle, with advice for the radio's volume knob. The modem always shows each
+  received burst's peak level and warns, at most every 30 s, when bursts are too loud or
+  too quiet or when received audio clips. `vardefm monitor` gives the same advice.
+  `RxBurst` carries the burst's audio level (`AudioLevel`).
+
+### Changed
+- `vardefm ptt-test --ptt vox` now says that VardeFM keys nothing with VOX and points to
+  `vardefm tone`, instead of reporting a 2-second key-up that never happened.
+- `docs/RADIO.md` covers USB sound dongles that key the radio by VOX, and how the VOX
+  hang time eats into the other station's leader.
+
 ## [0.3.0] - 2026-11-03
 
 **Not on-air compatible with 0.2.x.** The LDPC codes, the per-level transmit drive and the

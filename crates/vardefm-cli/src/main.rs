@@ -144,6 +144,9 @@ enum Cmd {
         /// Do not print a line per burst
         #[arg(long)]
         quiet: bool,
+        /// Print the receive level every 2 s while idle, to set the radio's volume
+        #[arg(long)]
+        levels: bool,
     },
     /// Measure whether this computer decodes fast enough for each mode and speed level
     Bench {
@@ -362,6 +365,7 @@ fn main() {
             record,
             max_level,
             quiet,
+            levels,
         } => {
             let ptt = ptt.parse().unwrap_or_else(|m: String| die(&m));
             let cfg = vardefm_tnc::radio::RadioConfig {
@@ -379,6 +383,7 @@ fn main() {
                 record: record.map(Into::into),
                 max_level,
                 verbose: !quiet,
+                show_levels: levels,
             };
             let stop = radio_cmds::stop_flag();
             if let Err(err) = vardefm_tnc::radio::run(cfg, stop) {

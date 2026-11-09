@@ -53,6 +53,17 @@ impl Verdict {
     }
 }
 
+impl Verdict {
+    /// Advice for audio measured while no burst is being received. A quiet
+    /// level then usually means the squelch is closed, not that the volume is low.
+    pub fn idle_advice(self) -> &'static str {
+        match self {
+            Self::Quiet => "quiet: squelch closed or nothing heard; set the volume while a station transmits",
+            other => other.advice(),
+        }
+    }
+}
+
 /// Measures audio over windows of a fixed length.
 pub struct LevelMeter {
     window: usize,
@@ -91,14 +102,14 @@ impl LevelMeter {
     }
 }
 
-/// One meter line: `level  -22.6 dBFS rms   -8.3 dBFS peak |#####   ok`.
+/// One meter line for idle audio: `level  -22.6 dBFS rms   -8.3 dBFS peak |#####   ok`.
 pub fn meter_line(level: AudioLevel) -> String {
     let bar = "#".repeat(((level.rms_dbfs + 60.0).max(0.0) / 2.0) as usize);
     format!(
         "level {:6.1} dBFS rms {:6.1} dBFS peak |{bar:<30} {}",
         level.rms_dbfs,
         level.peak_dbfs,
-        Verdict::of(level).advice()
+        Verdict::of(level).idle_advice()
     )
 }
 
@@ -130,5 +141,13 @@ mod tests {
         assert!(m.push(&[0.0; 50]).is_none(), "the window starts over");
         let quiet = m.push(&[0.0; 50]).unwrap();
         assert_eq!(Verdict::of(quiet), Verdict::Silent);
+    }
+
+    #[test]
+    fn idle_meter_does_not_ask_for_more_volume_on_a_closed_squelch() {
+        // Measured on a handheld with the squelch closed.
+        let closed = AudioLevel { rms_dbfs: -42.2, peak_dbfs: -41.3 };
+        assert!(meter_line(closed).contains("squelch closed"), "{}", meter_line(closed));
+        assert_eq!(Verdict::of(closed).advice(), "quiet: turn the radio volume up");
     }
 }

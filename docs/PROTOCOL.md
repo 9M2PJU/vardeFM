@@ -267,7 +267,7 @@ Each command gets `OK`, or `WRONG` if it is invalid.
 | `CANCELPENDING` | Reserved; not sent yet. |
 | `BUFFER <n>` | Bytes queued and not yet acknowledged. Sent after every read from the data port (even if *n* is unchanged), and whenever acknowledgements change *n*, down to `BUFFER 0`. A report that follows a write therefore already counts that write. |
 | `PTT ON` / `PTT OFF` | Transmitter keyed / released. |
-| `BUSY ON` / `BUSY OFF` | Channel activity heard (audio above the squelch threshold, or a frame being received). |
+| `BUSY ON` / `BUSY OFF` | Channel activity heard (audio at least 6 dB above the background level and above −40 dBFS, or a frame being received). A steady open-squelch hiss becomes the background within about 2 s. |
 | `IAMALIVE` | Every 60 s. |
 
 ### 4.3 Data port

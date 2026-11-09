@@ -20,6 +20,15 @@ run the same minor version.
   hang time eats into the other station's leader.
 
 ### Fixed
+- **The modem never transmitted with the radio's squelch open.** The steady hiss
+  counted as a busy channel (anything above −40 dBFS did), so a call waited for a free
+  channel until it gave up. The busy detector now compares the audio with the
+  background level of the last 2 s and needs 6 dB more, so a steady hiss is not busy;
+  with the squelch closed it behaves as before. It also ignores a DC offset from the
+  sound card. `docs/RADIO.md` now recommends a squelch that closes when nobody
+  transmits, and explains what an open squelch costs.
+- The idle level meter (`modem --levels`, `monitor`) no longer says "turn the radio
+  volume up" when the squelch is simply closed.
 - **DISCONNECT could overtake data** that the host wrote just before it, on a busy
   computer. The data port reader timed its "socket empty" mark after the read had timed
   out, so a pause of the reader thread could make data that arrived meanwhile count as

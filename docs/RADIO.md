@@ -88,9 +88,17 @@ your user needs to be in group `gpio` (the default user already is):
    the same meter every 2 s while the modem is idle, and the modem always shows
    each received burst's peak level. With or without `--levels`, the modem warns
    (at most every 30 s) when received bursts are too loud or too quiet, or when
-   any received audio clips.
-   Open the squelch slightly or set it low: VardeFM detects frames by itself.
-   Squelch tail noise is fine.
+   any received audio clips. Set the volume while a station is transmitting: with
+   the squelch closed the idle meter reads quiet, and that is fine.
+
+   **Squelch.** Set it just high enough to close when nobody is transmitting
+   (on many handhelds a low setting such as 1–3). VardeFM waits for a free
+   channel before it transmits, and with the squelch closed any signal counts,
+   including someone talking.
+   An open squelch also works: VardeFM learns the steady hiss as background
+   within about 2 s and does not count it as busy, and it finds its own frames
+   in the noise. But a voice or other signal that is not clearly louder than the
+   hiss is then not noticed. Squelch tail noise is fine.
 
 5. **Run the modem.**
    ```powershell

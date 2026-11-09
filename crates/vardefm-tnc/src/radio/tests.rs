@@ -127,6 +127,30 @@ impl HostSide {
 
 #[test]
 fn session_over_fake_sound_cards() {
+    session(0.0);
+}
+
+/// With the squelch open each radio hears hiss (-27 dBFS rms, as measured on a
+/// handheld) whenever the other is not transmitting. The hiss must not count as
+/// a busy channel, or no one would ever transmit.
+#[test]
+fn session_with_open_squelch() {
+    session(0.045);
+}
+
+/// A full session; `hiss` is the RMS of the noise heard while the other side is silent.
+fn session(hiss: f32) {
+    let mut seed = 0x1234_5678u32;
+    let mut hiss_chunk = move || -> Vec<f32> {
+        (0..CHUNK)
+            .map(|_| {
+                seed ^= seed << 13;
+                seed ^= seed >> 17;
+                seed ^= seed << 5;
+                (seed as f32 / u32::MAX as f32 * 2.0 - 1.0) * hiss * 3f32.sqrt()
+            })
+            .collect()
+    };
     let cards: [Shared; 2] = [Arc::default(), Arc::default()];
     let mut eng = [engine(&cards[0], 1), engine(&cards[1], 2)];
     let mut host = [HostSide::default(), HostSide::default()];
@@ -141,7 +165,8 @@ fn session_over_fake_sound_cards() {
     for step in 0..60_000 {
         // Each station hears what the other radiated in the previous tick.
         for i in 0..2 {
-            let heard = air[1 - i].clone();
+            let other = &air[1 - i];
+            let heard = if hiss > 0.0 && other.iter().all(|x| *x == 0.0) { hiss_chunk() } else { other.clone() };
             let out = eng[i].step(Some(&heard), std::mem::take(&mut inbox[i]));
             host[i].take(out);
         }

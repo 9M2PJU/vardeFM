@@ -6,6 +6,7 @@
 //! - The payload is `ncw` codewords of 2400 bits at the speed level named in the
 //!   header. Each codeword carries `k/8 - 4` data bytes plus a CRC-32.
 
+mod busy;
 mod header;
 mod receiver;
 

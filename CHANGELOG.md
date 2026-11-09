@@ -6,6 +6,10 @@ run the same minor version.
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-11-09
+
+On-air compatible with 0.3.0.
+
 ### Added
 - **Receive level advice.** `vardefm modem --levels` prints the receive level every 2 s
   while idle, with advice for the radio's volume knob. The modem always shows each
@@ -90,6 +94,8 @@ correction with seven speed levels, selective-repeat ARQ link layer, VARA-compat
 host interface, `sim-pair` virtual radio pair, sound card I/O with serial, CM108 and
 GPIO PTT, and release builds for Windows, Linux and Raspberry Pi.
 
+[Unreleased]: https://github.com/notepid/vardeFM/compare/v0.3.1...HEAD
+[0.3.1]: https://github.com/notepid/vardeFM/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/notepid/vardeFM/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/notepid/vardeFM/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/notepid/vardeFM/compare/v0.1.0...v0.2.0

@@ -204,7 +204,9 @@ pub(crate) fn true_position(m: &Modem, mode: &str, level: u8, ncw: usize) -> usi
 /// and preambles come from the modulator itself: preamble B's body ends where the
 /// header and codeword symbols start. The channel delay is the lag up to one cyclic
 /// prefix at which the received copy correlates best with what was sent. Neither
-/// depends on any detector.
+/// depends on any detector. The correlation is signed: the simulated channel does
+/// not invert the audio. A delay of 0 or a whole cyclic prefix is the edge of the
+/// search, not a peak.
 fn position_check(m: &Modem, mode: &str, level: u8, ncw: usize) -> (i64, usize) {
     let clean = FmChannelConfig { cnr_db: None, ..FmChannelConfig::by_name(mode).unwrap() };
     let p = &m.ofdm.p;
@@ -437,8 +439,9 @@ fn detector_eval() {
         let truth = true_position(&m, mode, level, ncw);
         let (after, delay) = position_check(&m, mode, level, ncw);
         println!(
-            "  true position: sample {truth}, {after} after the sent boundary; channel delay {delay}, \
+            "  true position: sample {truth}, {after} after the sent boundary; channel delay {delay}{}, \
              so {} after the boundary plus the delay; hit within ±{}",
+            if delay == 0 || delay == m.ofdm.p.ncp { " (edge of the search, not a peak)" } else { "" },
             after - delay as i64,
             m.ofdm.p.ncp / 4
         );
@@ -502,6 +505,7 @@ fn harness_sees_strong_bursts_and_no_false_headers() {
         // cyclic prefix of the sent boundary plus the channel delay.
         let (after, delay) = position_check(&m, mode, 1, 1);
         let ncp = m.ofdm.p.ncp as i64;
+        assert!(delay > 0 && (delay as i64) < ncp, "{mode}: channel delay {delay} is the edge of the 0..={ncp} search");
         assert!(
             (after - delay as i64).abs() <= ncp,
             "{mode}: true position {after} after the sent boundary, channel delay {delay}: more than {ncp} apart"

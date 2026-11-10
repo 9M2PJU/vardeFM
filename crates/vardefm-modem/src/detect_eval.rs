@@ -334,6 +334,13 @@ fn detector_eval() {
     assert!(trials > 0, "TRIALS must be at least 1");
     assert!(noise_s > 0.0, "NOISE_SECONDS={noise_s}: must be more than 0");
     let modes: Vec<&str> = modes.iter().map(String::as_str).collect();
+    // Checked up front, so that a bad NCW does not fail after the first mode has run.
+    for mode in &modes {
+        // A longer burst would modulate, but its header would not unpack (MAX_NCW) or
+        // the modem would never send it (MAX_PAYLOAD_SECONDS): every trial would fail.
+        let max = modem(mode).max_ncw(level);
+        assert!(ncw <= max, "NCW {ncw}: a level {level} burst in {mode} mode holds at most {max} codewords");
+    }
     let cnr_list = |mode: &str| -> Vec<f32> {
         let default = if mode == "narrow" { "3,4,5,6,7,8,10" } else { "5,6,7,8,9,10,12" };
         env_list("CNRS", default)
@@ -356,10 +363,6 @@ fn detector_eval() {
     );
     for &mode in &modes {
         let m = modem(mode);
-        // A longer burst would modulate, but its header would not unpack (MAX_NCW) or
-        // the modem would never send it (MAX_PAYLOAD_SECONDS): every trial would fail.
-        let max = m.max_ncw(level);
-        assert!(ncw <= max, "NCW {ncw}: a level {level} burst in {mode} mode holds at most {max} codewords");
         println!("\n{mode}: hits and decoded bursts out of {trials}; paired test against '{}'", names[0]);
         for cnr in cnr_list(mode) {
             let res = run_trials(&m, mode, cnr, level, ncw, trials);

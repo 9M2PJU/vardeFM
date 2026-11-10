@@ -35,13 +35,19 @@ matching system). Options: `--version X.Y.Z`, `--to DIR`,
 
 - `packaging/aur/vardefm/PKGBUILD` — builds from the release source tarball.
 - `packaging/aur/vardefm-bin/PKGBUILD` — repacks the `linux_amd64` release tarball.
+- `packaging/aur/vardefm-git/PKGBUILD` — builds the latest git `master` (VCS package).
 
 Refresh `.SRCINFO` after touching a `PKGBUILD`:
 
 ```sh
 (cd packaging/aur/vardefm && makepkg --printsrcinfo > .SRCINFO)
 (cd packaging/aur/vardefm-bin && makepkg --printsrcinfo > .SRCINFO)
+(cd packaging/aur/vardefm-git && makepkg --printsrcinfo > .SRCINFO)
 ```
+
+The `packaging.yml` workflow updates `vardefm` and `vardefm-bin` on every `v*`
+tag. `vardefm-git` floats with git master, so it needs no per-release update
+(only push when the `PKGBUILD` itself changes).
 
 The `packaging.yml` workflow updates both on every `v*` tag. It needs three
 repository secrets: `AUR_SSH_PRIVATE_KEY` (the AUR ssh key), `AUR_USERNAME`,

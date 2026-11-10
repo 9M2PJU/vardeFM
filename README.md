@@ -38,7 +38,8 @@ matching system, else the tarball binary):
 curl -fsSL https://raw.githubusercontent.com/notepid/vardeFM/master/packaging/install.sh | sh
 ```
 
-Arch Linux: `yay -S vardefm` (source build) or `yay -S vardefm-bin` (release binary).
+Arch Linux: `yay -S vardefm` (source build), `vardefm-bin` (release binary),
+or `vardefm-git` (latest git).
 
 The `.deb`/`.rpm` packages also install the udev rules for CM108 PTT, a
 systemd unit, and a man page (`man vardefm`).

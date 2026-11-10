@@ -40,7 +40,10 @@ curl -fsSL https://raw.githubusercontent.com/notepid/vardeFM/master/packaging/in
 
 Arch Linux: `yay -S vardefm` (source build) or `yay -S vardefm-bin` (release binary).
 
-Each archive includes the user guide ([packaging/README.md](packaging/README.md)). It covers
+The `.deb`/`.rpm` packages also install the udev rules for CM108 PTT, a
+systemd unit, and a man page (`man vardefm`).
+
+Each download includes the user guide ([packaging/README.md](packaging/README.md)). It covers
 installation, connecting a radio, PTT, and setting up Pat, Winlink Express and HamBBS.
 [docs/RADIO.md](docs/RADIO.md) goes deeper into the radio setup.
 

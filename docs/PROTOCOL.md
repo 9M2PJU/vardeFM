@@ -276,8 +276,10 @@ not on-air compatible with VARA FM digipeaters.
 - **Repeating:** a digipeater never repeats a burst with route field 0, and such a burst
   does not change what it knows: a direct session cannot be mistaken for a routed one.
   It learns a session from a routed ConnectReq or ConnectAck that names one of its call
-  signs, and keeps it by session id until 10 minutes pass without a burst it repeats
-  (30 s after it repeats a DiscAck). Until it has repeated the called station's answer
+  signs, and keeps it by session id until 10 minutes pass without a burst it repeats.
+  Once it has repeated a DiscAck the session is over: it repeats only a resent Disc or
+  DiscAck, forgets the session 30 s after the last of them, and takes a connect burst
+  under that id as a new session. Until it has repeated the called station's answer
   (a ConnectAck or a burst with UP = 1) it keeps the session only 90 s, renewed by each
   request, and repeats nothing else from the caller's side, so an unanswered request does
   not linger or repeat the bursts of another routed session that reuses the id and whose

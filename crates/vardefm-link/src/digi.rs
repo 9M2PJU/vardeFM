@@ -21,7 +21,8 @@ use vardefm_modem::{Burst, Kind, RxBurst};
 /// A session is forgotten after this long without a burst. Well above the end
 /// stations' keepalive on a routed session, even with a large hop margin.
 const IDLE_EXPIRY_S: f64 = 600.0;
-/// After the closing DiscAck, kept this long to repeat a resent Disc/DiscAck.
+/// After the closing DiscAck, kept this long after the last Disc or DiscAck we repeat,
+/// so a resent Disc and its answer still get through.
 const CLOSE_EXPIRY_S: f64 = 30.0;
 /// Life of a session not yet answered (no ConnectAck or burst from the called station
 /// repeated). A stale entry would repeat the bursts of a later routed session that
@@ -45,12 +46,17 @@ struct Entry {
     /// We have repeated the called station's answer (its ConnectAck or any burst with
     /// UP set). Until then the entry lives only `UNCONFIRMED_EXPIRY_S`.
     confirmed: bool,
+    /// We have repeated a DiscAck: the session is over. Only a resent Disc and its
+    /// DiscAck can follow, and the entry lives only `CLOSE_EXPIRY_S`.
+    closing: bool,
     expires: f64,
 }
 
 impl Entry {
     fn life_s(&self) -> f64 {
-        if self.confirmed {
+        if self.closing {
+            CLOSE_EXPIRY_S
+        } else if self.confirmed {
             IDLE_EXPIRY_S
         } else {
             UNCONFIRMED_EXPIRY_S
@@ -111,10 +117,11 @@ impl Digipeater {
             }
             let hops = digis.len() as u8;
             match self.table.get_mut(&h.session) {
-                // The same route again (a resent request or ack): keep what we know.
-                Some(e) if e.pos == pos && e.hops == hops => e.expires = e.expires.max(now + e.life_s()),
+                // The same route again (a resent request or ack): keep what we know. On a
+                // closed session it is a new session with the same id, so start afresh.
+                Some(e) if e.pos == pos && e.hops == hops && !e.closing => e.expires = e.expires.max(now + e.life_s()),
                 _ => {
-                    let e = Entry { pos, hops, confirmed: false, expires: now + UNCONFIRMED_EXPIRY_S };
+                    let e = Entry { pos, hops, confirmed: false, closing: false, expires: now + UNCONFIRMED_EXPIRY_S };
                     self.table.insert(h.session, e);
                 }
             }
@@ -140,8 +147,14 @@ impl Digipeater {
         if !e.confirmed && !answer && h.kind != Kind::ConnectReq {
             return;
         }
+        // After the DiscAck the session is over. A resent Disc must not bring back the
+        // idle lifetime, and anything else is another session using the id.
+        if e.closing && !matches!(h.kind, Kind::Disc | Kind::DiscAck) {
+            return;
+        }
         e.confirmed |= answer;
-        e.expires = now + if h.kind == Kind::DiscAck { CLOSE_EXPIRY_S } else { e.life_s() };
+        e.closing |= h.kind == Kind::DiscAck;
+        e.expires = now + e.life_s();
         let mut header = h;
         header.set_hop(hop);
         let payload = rx.payload.iter().map(|cw| cw.clone().unwrap_or_else(|| void_codeword(h.level))).collect();
@@ -422,6 +435,37 @@ mod tests {
         let t = 15.0 + IDLE_EXPIRY_S - 1.0;
         assert!(repeat(&mut d, t, &rx(Kind::Data, 7, false, 0, vec![])).is_some(), "quiet but confirmed");
         assert!(repeat(&mut d, t + IDLE_EXPIRY_S + 1.0, &rx(Kind::Data, 7, false, 0, vec![])).is_none());
+    }
+
+    #[test]
+    fn closed_session_keeps_the_close_window() {
+        let mut d = stale_entry();
+        assert!(repeat(&mut d, 5.0, &connect_ack(7, &["LA3D1"], 0)).is_some());
+        assert!(repeat(&mut d, 100.0, &rx(Kind::Disc, 7, false, 0, vec![])).is_some());
+        assert!(repeat(&mut d, 103.0, &rx(Kind::DiscAck, 7, true, 0, vec![])).is_some());
+        // The caller missed the DiscAck and resends its Disc. We repeat it, but the
+        // answer to it never reaches us: the entry must still go after the close window.
+        assert!(repeat(&mut d, 115.0, &rx(Kind::Disc, 7, false, 0, vec![])).is_some());
+        // Meanwhile only the close is repeated, from either end.
+        assert!(repeat(&mut d, 120.0, &rx(Kind::Data, 7, false, 0, vec![])).is_none(), "Data after the close");
+        assert!(repeat(&mut d, 121.0, &rx(Kind::Data, 7, true, 0, vec![])).is_none(), "Data after the close");
+        assert_eq!(d.sessions(), 1);
+        let gone = 115.0 + CLOSE_EXPIRY_S + 1.0;
+        assert!(repeat(&mut d, gone, &rx(Kind::Disc, 7, false, 0, vec![])).is_none(), "kept past the close window");
+        assert_eq!(d.sessions(), 0);
+    }
+
+    #[test]
+    fn new_session_on_a_closed_entry_starts_afresh() {
+        let mut d = stale_entry();
+        assert!(repeat(&mut d, 5.0, &connect_ack(7, &["LA3D1"], 0)).is_some());
+        assert!(repeat(&mut d, 100.0, &rx(Kind::DiscAck, 7, true, 0, vec![])).is_some());
+        // The same id on the same path again, within the close window.
+        assert!(repeat(&mut d, 110.0, &connect_req(7, &["LA3D1"], 0)).is_some());
+        assert!(repeat(&mut d, 112.0, &rx(Kind::Data, 7, false, 0, vec![])).is_none(), "not answered yet");
+        assert!(repeat(&mut d, 115.0, &connect_ack(7, &["LA3D1"], 0)).is_some());
+        let t = 115.0 + CLOSE_EXPIRY_S + 60.0;
+        assert!(repeat(&mut d, t, &rx(Kind::Data, 7, false, 0, vec![])).is_some(), "the new session is live");
     }
 
     #[test]

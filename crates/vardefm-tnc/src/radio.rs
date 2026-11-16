@@ -158,6 +158,23 @@ impl<S: AudioSink> RadioEngine<S> {
         }
     }
 
+    /// An engine set up as `cfg` asks: the link's limits and hop margin, gain, logging
+    /// and the digipeater's call signs.
+    pub fn from_config(cfg: &RadioConfig, modem: Arc<Modem>, ptt: Box<dyn Ptt>, out: S, seed: u32) -> Self {
+        let link = LinkConfig {
+            max_level: cfg.max_level,
+            start_level: cfg.max_level.min(1),
+            hop_margin_s: cfg.hop_margin_s,
+            ..LinkConfig::default()
+        };
+        let mut engine = Self::new(modem, link, ptt, out, cfg.txtail_s, seed);
+        engine.tx_gain = cfg.tx_gain;
+        engine.show_levels = cfg.show_levels;
+        engine.record = cfg.record.clone();
+        engine.station.set_digi(&cfg.digi_calls);
+        engine
+    }
+
     /// Warn about a bad receive level, at most every [`LEVEL_WARN_EVERY_S`] seconds.
     fn level_warning(&mut self, now: f64, what: &str, level: AudioLevel) {
         let verdict = Verdict::of(level);
@@ -279,12 +296,6 @@ pub fn run(cfg: RadioConfig, stop: Arc<AtomicBool>) -> io::Result<()> {
     let params = OfdmParams::by_name(&cfg.mode).ok_or_else(|| io::Error::other("mode must be narrow or wide"))?;
     let modem = Arc::new(Modem::new(params, cfg.txdelay_s));
     let ptt = vardefm_ptt::open(&cfg.ptt)?;
-    let link = LinkConfig {
-        max_level: cfg.max_level,
-        start_level: cfg.max_level.min(1),
-        hop_margin_s: cfg.hop_margin_s,
-        ..LinkConfig::default()
-    };
     let input = open_input(cfg.audio_in.as_deref(), cfg.in_channel)?;
     let output = open_output(cfg.audio_out.as_deref(), cfg.out_channel)?;
     let port = HostPort::bind(&cfg.host, cfg.port, cfg.port + 1)?;
@@ -307,11 +318,7 @@ pub fn run(cfg: RadioConfig, stop: Arc<AtomicBool>) -> io::Result<()> {
         println!("  levels   : every {LEVEL_WINDOW_S} s while idle; set the radio volume so bursts peak near -6 dBFS");
     }
 
-    let mut engine = RadioEngine::new(modem, link, ptt, output, cfg.txtail_s, link_seed());
-    engine.tx_gain = cfg.tx_gain;
-    engine.show_levels = cfg.show_levels;
-    engine.record = cfg.record.clone();
-    engine.station.set_digi(&cfg.digi_calls);
+    let mut engine = RadioEngine::from_config(&cfg, modem, ptt, output, link_seed());
     while !stop.load(Ordering::Relaxed) {
         let chunk = input.rx.recv_timeout(Duration::from_millis(50)).ok();
         let host_in: Vec<HostIn> = port.inbox.try_iter().collect();

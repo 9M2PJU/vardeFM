@@ -287,3 +287,89 @@ fn level_lines_only_when_asked() {
         assert_eq!(lines, if show { 2 } else { 0 }, "{:?}", eng.notices);
     }
 }
+
+/// A, a digipeater and B on fake sound cards, set up from a `RadioConfig` as `run`
+/// does. A and B hear only the digipeater.
+#[test]
+fn session_through_a_digipeater_over_fake_sound_cards() {
+    let cards: [Shared; 3] = [Arc::default(), Arc::default(), Arc::default()];
+    let (a, d, b) = (0, 1, 2);
+    let mut eng: Vec<RadioEngine<FakeOut>> = (0..3)
+        .map(|i| {
+            let cfg = RadioConfig {
+                hop_margin_s: 1.5,
+                digi_calls: if i == d { vec!["LA3DDD".into()] } else { Vec::new() },
+                ..RadioConfig::default()
+            };
+            let modem = Arc::new(Modem::new(OfdmParams::narrow(), cfg.txdelay_s));
+            let (ptt, out) = (Box::new(FakePtt(cards[i].clone())), FakeOut(cards[i].clone()));
+            RadioEngine::from_config(&cfg, modem, ptt, out, i as u32 + 1)
+        })
+        .collect();
+    for e in &eng {
+        assert_eq!(e.station.link_config().hop_margin_s, 1.5);
+    }
+    let mut host = [HostSide::default(), HostSide::default(), HostSide::default()];
+    let line = |s: &str| HostIn::Line(s.into());
+    let mut inbox: [Vec<HostIn>; 3] = [
+        vec![line("MYCALL LA1AAA"), line("CONNECT LA1AAA LA2BBB VIA LA3DDD")],
+        Vec::new(),
+        vec![line("MYCALL LA2BBB"), line("LISTEN ON")],
+    ];
+    let to_a: Vec<u8> = (0..600u32).map(|i| (i * 7) as u8).collect();
+    let to_b: Vec<u8> = (0..400u32).map(|i| (i * 13 + 5) as u8).collect();
+    let mut air = vec![vec![0.0f32; CHUNK]; 3];
+    let (mut sent_b, mut sent_a, mut disc) = (false, false, false);
+    let mut done_at = None;
+
+    for step in 0..60_000 {
+        // Each station hears what its neighbours radiated in the previous tick.
+        let both: Vec<f32> = air[a].iter().zip(&air[b]).map(|(x, y)| x + y).collect();
+        for i in 0..3 {
+            let heard = if i == d { &both } else { &air[d] };
+            let out = eng[i].step(Some(heard), std::mem::take(&mut inbox[i]));
+            host[i].take(out);
+        }
+        for i in 0..3 {
+            air[i] = cards[i].lock().unwrap().tick();
+        }
+        if !sent_b && host[b].lines.iter().any(|l| l.starts_with("CONNECTED")) {
+            inbox[b].push(HostIn::Data(to_a.clone()));
+            sent_b = true;
+        }
+        if !sent_a && host[a].data.len() >= to_a.len() {
+            inbox[a].push(HostIn::Data(to_b.clone()));
+            sent_a = true;
+        }
+        if !disc && host[b].data.len() >= to_b.len() && host[a].lines.last().is_some_and(|l| l == "BUFFER 0") {
+            inbox[a].push(line("DISCONNECT"));
+            disc = true;
+        }
+        if done_at.is_none() && host[a].has("DISCONNECTED") && host[b].has("DISCONNECTED") {
+            println!("session done after {:.1} s", step as f64 * 0.01);
+            done_at = Some(step);
+        }
+        // Let the digipeater finish the tail of its last repeat.
+        if done_at.is_some_and(|t| step > t + 50) {
+            break;
+        }
+    }
+    assert_eq!(host[a].data, to_a, "A's received data");
+    assert_eq!(host[b].data, to_b, "B's received data");
+    assert!(host[a].has("DISCONNECTED") && host[b].has("DISCONNECTED"), "A: {:?}", host[a].lines);
+    assert!(host[a].has("CONNECTED LA1AAA LA2BBB NARROW") && host[b].has("CONNECTED LA1AAA LA2BBB NARROW"));
+    // The digipeater repeated, logged each repeat as one, and told its own host nothing
+    // about a session.
+    let repeats = eng[d].log.iter().filter(|l| l.contains(" rpt ")).count();
+    assert!(repeats >= 6, "only {repeats} repeats: {:?}", eng[d].log);
+    assert!(!eng[d].log.iter().any(|l| l.contains(" tx ")), "{:?}", eng[d].log);
+    assert!(!host[d].lines.iter().any(|l| l.contains("CONNECTED") || l == "PENDING"), "{:?}", host[d].lines);
+    for (i, c) in cards.iter().enumerate() {
+        let c = c.lock().unwrap();
+        assert_eq!(c.leaked, 0, "station {i}: audio played with PTT off");
+        assert!(!c.ptt, "station {i}: left keyed");
+    }
+    for e in &eng {
+        assert!(!e.log.iter().any(|l| l.contains("watchdog")), "{:?}", e.log);
+    }
+}

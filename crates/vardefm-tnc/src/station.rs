@@ -62,6 +62,10 @@ impl Station {
         &self.modem
     }
 
+    pub fn link_config(&self) -> &LinkConfig {
+        self.node.link.config()
+    }
+
     /// Repeat the bursts of sessions routed through any of `calls` (none: off).
     /// Works without a host and alongside our own sessions.
     pub fn set_digi(&mut self, calls: &[String]) {

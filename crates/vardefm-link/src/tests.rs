@@ -34,6 +34,8 @@ struct Net {
     burst_loss: f64,
     cw_loss: f64,
     airtime: f64,
+    /// Every burst a station's own link sent (repeats left out): (from, start, end, kind).
+    sent: Vec<(usize, f64, f64, Kind)>,
 }
 
 const A: usize = 0;
@@ -85,6 +87,7 @@ impl Net {
             burst_loss,
             cw_loss,
             airtime: 0.0,
+            sent: Vec::new(),
         }
     }
 
@@ -179,6 +182,9 @@ impl Net {
                 }
             }
             self.history.push((i, now, end));
+            if !digi {
+                self.sent.push((i, now, end, b.header.kind));
+            }
             self.nodes[i].tx = Some((now, end, b, digi));
         }
         for n in &mut self.nodes {
@@ -944,4 +950,91 @@ fn connect_payload_parsing() {
     assert_eq!(parse_calls_payload(&good[..count_at]), None);
     assert_eq!(parse_calls_payload(&good[..count_at + 3]), None);
     assert_eq!(parse_calls_payload(&[]), None);
+}
+
+/// Longest burst any level can send, from the modem alone.
+fn longest_burst(modem: &Modem) -> f64 {
+    (0..LEVELS.len() as u8).map(|l| modem.burst_seconds(l, modem.max_ncw(l)) as f64).fold(0.0, f64::max)
+}
+
+/// A quiet session through `digis`, with the far end of `who` then switched off.
+/// `act` makes `who` start sending; returns the (start, end) of each burst of `kind`
+/// it sent until it gave up.
+fn unanswered_bursts(
+    digis: &[&str],
+    seed: u32,
+    who: usize,
+    kind: Kind,
+    act: impl Fn(&mut Link, f64),
+) -> Vec<(f64, f64)> {
+    let mut net = Net::chain(seed, 0.0, digis, LinkConfig::default());
+    let (who, other) = if who == A { (A, net.b()) } else { (net.b(), A) };
+    net.nodes[A].node.link.connect(0.0, "LA1AAA", "LA2BBB-1", &via(digis)).unwrap();
+    net.run_until(120.0, |n| n.both_connected());
+    let quiet = net.now + 20.0;
+    net.run_until(30.0, |n| n.now >= quiet);
+    net.nodes[other].dead = true;
+    let from = net.now;
+    act(&mut net.nodes[who].node.link, from);
+    net.run_until(1200.0, |n| n.nodes[who].node.link.is_idle());
+    net.sent.iter().filter(|s| s.0 == who && s.1 >= from && s.3 == kind).map(|s| (s.1, s.2)).collect()
+}
+
+#[test]
+fn retries_are_spaced_as_the_protocol_document_says() {
+    // Measured on the channel, from the figures in docs/PROTOCOL.md 3.2 and 3.4, not
+    // from the link's own helpers.
+    let cfg = LinkConfig::default();
+    let (timeout, turnaround, margin, backoff) = (1.2, 0.2, 0.5, 0.4);
+    assert_eq!((cfg.response_timeout_s, cfg.turnaround_s, cfg.hop_margin_s), (timeout, turnaround, margin));
+    // One step of the fake channel either side of each timer.
+    let slack = 5.0 * DT;
+    let longest = longest_burst(&Modem::new(OfdmParams::narrow(), 0.1));
+    let mut widest_spread = [0.0f64; 3];
+    for (hops, digis) in [&[][..], &["LA3DDD"], &["LA3DDD", "LA4EEE-2"]].into_iter().enumerate() {
+        let n = hops as f64;
+        let spread = backoff * (1.0 + 2.0 * n);
+        // Wait after a burst of `own` s before it is sent again.
+        let wait = |own: f64| timeout + n * (own + longest + 2.0 * turnaround + margin);
+        let mut check = |what: &str, got: f64, base: f64| {
+            let over = got - base;
+            assert!(
+                over > -slack && over < spread + slack,
+                "via {digis:?}, {what}: {got:.2} s, not {base:.2} + 0..{spread:.1}"
+            );
+            widest_spread[hops] = widest_spread[hops].max(over);
+        };
+        for seed in 90..93 {
+            // The caller resends after the plain wait, counted from the end of its burst.
+            let sent = unanswered_bursts(digis, seed, A, Kind::Data, |link, _| link.send_data(b"anyone?"));
+            assert_eq!(sent.len(), 1 + cfg.max_retries as usize, "via {digis:?}");
+            for pair in sent.windows(2) {
+                check("caller", pair[1].0 - pair[0].1, wait(pair[0].1 - pair[0].0));
+            }
+            // The called station waits out the caller's longest retry period, counted
+            // from the start of its own burst, plus the time the caller's retry takes
+            // to reach it. Without digipeaters it waits like the caller.
+            let sent = unanswered_bursts(digis, seed, 1, Kind::Data, |link, _| link.send_data(b"anyone?"));
+            assert_eq!(sent.len(), 1 + cfg.max_retries as usize, "via {digis:?}");
+            for pair in sent.windows(2) {
+                if hops == 0 {
+                    check("called station", pair[1].0 - pair[0].1, wait(pair[0].1 - pair[0].0));
+                } else {
+                    let caller_period = longest + wait(longest) + spread;
+                    let reach = n * (longest + turnaround + margin);
+                    check("called station", pair[1].0 - pair[0].0, caller_period + reach);
+                }
+            }
+            // Its Disc is resent after the plain wait: a digipeater forgets the session
+            // soon after the DiscAck.
+            let sent = unanswered_bursts(digis, seed, 1, Kind::Disc, |link, now| link.disconnect(now));
+            assert_eq!(sent.len(), 4, "via {digis:?}");
+            for pair in sent.windows(2) {
+                check("called station's Disc", pair[1].0 - pair[0].1, wait(pair[0].1 - pair[0].0));
+            }
+        }
+    }
+    // Through digipeaters the random spread really is wider than a direct session's.
+    assert!(widest_spread[0] < backoff + slack);
+    assert!(widest_spread[1] > backoff + slack && widest_spread[2] > backoff + slack, "{widest_spread:?}");
 }

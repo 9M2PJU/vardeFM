@@ -230,7 +230,9 @@ and checked by the `fer_gate` test. That file is the reference; roughly, the poi
   segment: `offset mod 2²⁴ (3 bytes) | length (1 byte) | data | zero padding`.
 - **Acknowledgements:** every burst carries `ack_offset` and the bitmap for the peer's
   last burst. The sender drops acknowledged bytes and resends the rest, re-split to fit
-  the current level. Data is delivered to the host in order, exactly once.
+  the current level. Data is delivered to the host in order, exactly once. A receiver
+  must keep every byte of a codeword whose bitmap bit it sets: a resend may start at the
+  offset of a segment it already holds ahead of a gap, and carry more bytes.
 - **Turn-taking:** a station that receives a burst with data, or with POLL, answers after
   0.2 s. The answer holds acks plus any data of its own. If neither side has data, the
   link goes quiet. Either station may then start a burst once the channel has been clear

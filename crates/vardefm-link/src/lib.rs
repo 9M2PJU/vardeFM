@@ -629,7 +629,13 @@ impl Link {
             let start = expand(off, s.rx_next);
             let data = &cw[SEGMENT_HEADER..SEGMENT_HEADER + len];
             if start + len as u64 > s.rx_next && len > 0 {
-                s.rx_ooo.entry(start).or_insert_with(|| data.to_vec());
+                // A resend at another level can start at the same offset and hold more
+                // bytes. We acknowledge it, so the sender will not send those bytes
+                // again: keep the longer copy.
+                let kept = s.rx_ooo.entry(start).or_default();
+                if data.len() > kept.len() {
+                    *kept = data.to_vec();
+                }
             }
         }
         while let Some((&start, _)) = s.rx_ooo.iter().next() {

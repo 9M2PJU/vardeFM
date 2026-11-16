@@ -777,3 +777,47 @@ fn predicted_snr_matches_the_simulator() {
     let p = modem.predict_snr_db(15.9, 4, 5);
     assert!((p - 15.3).abs() < 1.0, "narrow L4 -> L5 at 14 dB CNR: {p:.1}");
 }
+
+#[test]
+fn longer_resend_of_a_stored_segment_is_kept() {
+    // A segment that arrived ahead of a gap is resent at a faster level, where one
+    // codeword holds more bytes from the same offset. The receiver acknowledges the
+    // resend, so the sender never sends those extra bytes again.
+    let mut net = Net::new(50, 0.0, 0.0);
+    net.nodes[0].link.connect(0.0, "LA1AAA", "LA2BBB-1", &[]).unwrap();
+    net.run_until(60.0, |n| n.both_connected());
+    let now = net.now;
+    let link = &mut net.nodes[1].link;
+    let State::Connected(s) = &link.state else { panic!("not connected") };
+    let id = s.id;
+    link.take_events();
+
+    let top = LEVELS.len() as u8 - 1;
+    let cap = |level: u8| Modem::payload_bytes(level) - SEGMENT_HEADER;
+    let (short, long) = (cap(0), cap(top));
+    assert!(long > short);
+    let d = data(short + long, 51);
+    // One Data burst with one segment: `bytes` at offset `off`.
+    let segment = |burst_id: u8, level: u8, off: usize, bytes: &[u8]| {
+        let mut cw = (off as u32).to_be_bytes()[1..].to_vec();
+        cw.push(bytes.len() as u8);
+        cw.extend_from_slice(bytes);
+        cw.resize(Modem::payload_bytes(level), 0);
+        let header = Header { kind: Kind::Data, session: id, level, ncw: 1, burst_id, ..Header::default() };
+        RxBurst { header, payload: vec![Some(cw)], snr_db: 30.0, end_sample: 0, level: Default::default() }
+    };
+    // Ahead of the gap, at level 0; then the same offset at the top level, with more bytes.
+    link.on_burst(now, &segment(1, 0, short, &d[short..2 * short]));
+    link.on_burst(now + 1.0, &segment(2, top, short, &d[short..]));
+    assert!(link.take_events().iter().all(|e| !matches!(e, LinkEvent::Data(_))), "delivered past the gap");
+    // The gap is filled: everything acknowledged must come out.
+    link.on_burst(now + 2.0, &segment(3, 0, 0, &d[..short]));
+    let got: Vec<u8> = link
+        .take_events()
+        .into_iter()
+        .filter_map(|e| if let LinkEvent::Data(x) = e { Some(x) } else { None })
+        .flatten()
+        .collect();
+    assert_eq!(got.len(), d.len(), "bytes of the longer resend were dropped");
+    assert_eq!(got, d);
+}

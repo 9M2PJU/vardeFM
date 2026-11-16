@@ -548,7 +548,9 @@ fn more_than_two_digipeaters_is_refused() {
         assert!(net.nodes[A].node.link.connect(0.0, "LA1AAA", "LA2BBB-1", &via(path)).is_err(), "via {path:?}");
         assert!(net.nodes[A].node.link.is_idle());
     }
-    // Nor is a request through three answered.
+    // Nor is a request through three answered. The header's hop field tops out at
+    // MAX_DIGIS, so such a request never looks fully repeated and is refused even without
+    // the payload's digipeater-count check (that limit is tested in connect_payload_parsing).
     let mut b = Link::new(net.modem.clone(), LinkConfig::default(), 1);
     b.set_mycalls(vec!["LA2BBB-1".into()]);
     b.set_listen(true);

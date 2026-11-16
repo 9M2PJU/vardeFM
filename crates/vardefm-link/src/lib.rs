@@ -80,7 +80,7 @@ const OFFSET_MOD: u64 = 1 << 24;
 /// holds at most 242 bytes). The receiver treats it as a failed codeword.
 const VOID_LEN: u8 = 0xff;
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct LinkConfig {
     /// Gap between receiving a burst and answering it.
     pub turnaround_s: f64,

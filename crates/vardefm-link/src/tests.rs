@@ -220,6 +220,28 @@ impl Net {
     }
 }
 
+#[test]
+fn write_is_reported_even_when_the_buffer_length_is_unchanged() {
+    // A write that lands in the same tick as the ack draining an equal amount leaves
+    // the buffer length as last reported. The host still needs a report newer than
+    // its write, so one must follow.
+    let mut net = Net::new(9, 0.0, 0.0);
+    net.nodes[A].node.link.connect(0.0, "LA1AAA", "LA2BBB-1", &[]).unwrap();
+    net.run_until(60.0, |n| n.nodes[A].node.link.is_connected() && n.nodes[1].node.link.is_connected());
+    let d = data(10, 9);
+    net.nodes[A].node.link.send_data(&d);
+    net.run_until(60.0, |n| n.nodes[1].host_rx.len() >= d.len());
+    assert_eq!(net.nodes[A].events.last(), Some(&LinkEvent::Buffer(10)));
+    // Stop one tick before B's ack reaches A, then write as much again.
+    net.run_until(60.0, |n| n.air.iter().any(|a| a.1 == A && a.0 <= n.now + DT));
+    let before = net.nodes[A].events.len();
+    net.nodes[A].node.link.send_data(&d);
+    net.step();
+    let reports: Vec<_> = net.nodes[A].events[before..].iter().filter(|e| matches!(e, LinkEvent::Buffer(_))).collect();
+    // Buffer(20) would mean the ack missed this tick (the setup drifted), not a bug.
+    assert_eq!(reports, [&LinkEvent::Buffer(10)], "none = write went unreported; Buffer(20) = ack not in this tick");
+}
+
 fn data(n: usize, seed: u32) -> Vec<u8> {
     // Every byte value, including CR and 0x00, in pseudo-random order.
     let mut rng = Prng::new(seed);

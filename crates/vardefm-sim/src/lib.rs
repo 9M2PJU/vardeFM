@@ -105,6 +105,15 @@ impl FmChannelConfig {
 /// Pass one transmission (audio at `cfg.fs`, full scale = peak deviation) through the channel.
 pub fn transmit(cfg: &FmChannelConfig, audio: &[f32]) -> Vec<f32> {
     let fs = cfg.fs;
+    for (name, us) in [("tx_emphasis_us", cfg.tx_emphasis_us), ("rx_emphasis_us", cfg.rx_emphasis_us)] {
+        assert!(us.is_none_or(|us| us.is_finite() && us > 0.0), "{name} {us:?}: must be a positive time constant");
+    }
+    if let Some(t) = &cfg.ctcss {
+        // A NaN here would make the FM phase NaN for the rest of the carrier.
+        assert!(t.hz.is_finite() && t.hz > 0.0 && t.hz < fs / 2.0, "CTCSS {} Hz: must be between 0 and fs/2", t.hz);
+        assert!(t.deviation_hz.is_finite() && t.deviation_hz >= 0.0, "CTCSS deviation {} Hz", t.deviation_hz);
+        assert!(t.phase.is_finite(), "CTCSS phase {}", t.phase);
+    }
     let lead = (cfg.lead_silence_s * fs) as usize;
     let trail = (cfg.trail_silence_s * fs) as usize;
     let keyup = (cfg.keyup_delay_s * fs) as usize;
@@ -200,6 +209,61 @@ mod tests {
         let out = transmit(&cfg, &tone);
         let peak = out[24_000..40_000].iter().fold(0f32, |m, v| m.max(v.abs()));
         assert!((peak - 0.3).abs() < 0.05, "peak {peak}");
+    }
+
+    /// Received amplitude of `f` Hz in `out[range]`, by correlation.
+    fn amplitude(out: &[f32], range: std::ops::Range<usize>, f: f32, fs: f32) -> f64 {
+        let w = 2.0 * std::f64::consts::PI * f as f64 / fs as f64;
+        let (c, s) = range.clone().fold((0.0, 0.0), |(c, s), i| {
+            let ph = w * i as f64;
+            (c + out[i] as f64 * ph.cos(), s + out[i] as f64 * ph.sin())
+        });
+        2.0 * f64::hypot(c, s) / range.len() as f64
+    }
+
+    #[test]
+    fn ctcss_tone_arrives_at_its_deviation() {
+        let base = FmChannelConfig { lead_silence_s: 0.0, keyup_delay_s: 0.0, ..FmChannelConfig::wide() };
+        for (hz, dev) in [(67.0, 300.0), (254.1, 750.0)] {
+            let cfg = FmChannelConfig { ctcss: Some(Ctcss { hz, deviation_hz: dev, phase: 1.0 }), ..base.clone() };
+            let out = transmit(&cfg, &vec![0.0; 48_000]);
+            let got = amplitude(&out, 12_000..44_000, hz, cfg.fs);
+            let want = (dev / cfg.deviation_hz) as f64;
+            assert!((got / want - 1.0).abs() < 0.1, "{hz} Hz: amplitude {got:.4}, want {want:.4}");
+        }
+    }
+
+    #[test]
+    fn emphasis_mismatch_tilts_the_response() {
+        // dB of 2 kHz over 500 Hz, for one emphasis setting. 750 us pre-emphasis
+        // lifts 2 kHz about 11.3 dB more than 500 Hz; de-emphasis takes it off.
+        let tilt = |tx: Option<f32>, rx: Option<f32>| {
+            let cfg = FmChannelConfig {
+                lead_silence_s: 0.0,
+                keyup_delay_s: 0.0,
+                tx_emphasis_us: tx,
+                rx_emphasis_us: rx,
+                ..FmChannelConfig::narrow()
+            };
+            let level = |f: f32| {
+                let tone: Vec<f32> = (0..48_000).map(|i| 0.02 * (2.0 * PI * f * i as f32 / 48_000.0).sin()).collect();
+                amplitude(&transmit(&cfg, &tone), 12_000..44_000, f, cfg.fs)
+            };
+            20.0 * (level(2000.0) / level(500.0)).log10()
+        };
+        let us = Some(750.0);
+        let matched = tilt(us, us);
+        let pre_only = tilt(us, None) - matched;
+        let de_only = tilt(None, us) - matched;
+        assert!((pre_only - 11.3).abs() < 1.5, "tx pre-emphasis only: {pre_only:+.1} dB");
+        assert!((de_only + 11.3).abs() < 1.5, "rx de-emphasis only: {de_only:+.1} dB");
+    }
+
+    #[test]
+    #[should_panic(expected = "CTCSS")]
+    fn a_nan_ctcss_tone_is_refused() {
+        let ctcss = Some(Ctcss { hz: f32::NAN, deviation_hz: 300.0, phase: 0.0 });
+        transmit(&FmChannelConfig { ctcss, ..FmChannelConfig::wide() }, &[0.0; 100]);
     }
 }
 

@@ -82,6 +82,7 @@ impl OfdmParams {
         [Self::narrow(), Self::wide()]
     }
 
+    /// The mode named `name`. Mode names are unique (a test checks it).
     pub fn by_name(name: &str) -> Option<Self> {
         Self::all().into_iter().find(|p| p.name == name)
     }
@@ -100,5 +101,19 @@ impl OfdmParams {
 
     pub fn carrier_freq(&self, k: usize) -> f32 {
         (self.first_bin + k) as f32 * self.bin_hz()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_mode_is_found_by_its_own_name() {
+        // A second mode with the same name could never be found by it.
+        for p in OfdmParams::all() {
+            assert_eq!(OfdmParams::by_name(p.name).map(|q| q.name), Some(p.name));
+            assert_eq!(OfdmParams::all().iter().filter(|q| q.name == p.name).count(), 1, "{}", p.name);
+        }
     }
 }

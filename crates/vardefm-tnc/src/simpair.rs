@@ -96,8 +96,18 @@ impl SimPair {
     pub fn start(cfg: SimPairConfig) -> io::Result<Self> {
         let params = OfdmParams::by_name(&cfg.mode)
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "mode must be narrow or wide"))?;
+        let invalid = |what: &str| Err(io::Error::new(io::ErrorKind::InvalidInput, what));
         if cfg.digis.len() > MAX_DIGIS {
-            return Err(io::Error::new(io::ErrorKind::InvalidInput, "at most two digipeaters"));
+            return invalid("at most two digipeaters");
+        }
+        // One station repeats for all its positions at once, so a second station with
+        // the same call sign would never see a burst it should repeat.
+        let calls: Vec<String> = cfg.digis.iter().map(|c| c.to_ascii_uppercase()).collect();
+        if calls.iter().enumerate().any(|(i, c)| calls[..i].contains(c)) {
+            return invalid("each digipeater needs its own call sign");
+        }
+        if !vardefm_link::valid_hop_margin(cfg.hop_margin_s) {
+            return invalid("hop margin must be from 0 to 10 seconds");
         }
         let channel = FmChannelConfig::by_name(&cfg.mode).unwrap();
         let data_port = |p: u16| if p == 0 { 0 } else { p + 1 };

@@ -7,6 +7,7 @@
 //! squelch tail, noise, clock offset). Stations are half-duplex: a station hears
 //! nothing while it transmits, and overlapping transmissions add up (collide).
 
+use crate::host::valid_call;
 use crate::server::{HostIn, HostPort};
 use crate::station::{HostOut, Station};
 use std::io;
@@ -99,6 +100,11 @@ impl SimPair {
         let invalid = |what: &str| Err(io::Error::new(io::ErrorKind::InvalidInput, what));
         if cfg.digis.len() > MAX_DIGIS {
             return invalid("at most two digipeaters");
+        }
+        // No spaces or other padding gets past this, so upper case is all that can
+        // differ between two spellings of one call sign.
+        if let Some(c) = cfg.digis.iter().find(|c| !valid_call(c)) {
+            return invalid(&format!("digipeater {c:?}: not a valid call sign"));
         }
         // One station repeats for all its positions at once, so a second station with
         // the same call sign would never see a burst it should repeat.

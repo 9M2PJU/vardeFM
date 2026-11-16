@@ -297,13 +297,14 @@ fn session_through_a_digipeater_over_fake_sound_cards() {
     let mut eng: Vec<RadioEngine<FakeOut>> = (0..3)
         .map(|i| {
             let cfg = RadioConfig {
+                // Not the default, so the check below shows it reaches the link.
                 hop_margin_s: 1.5,
                 digi_calls: if i == d { vec!["LA3DDD".into()] } else { Vec::new() },
                 ..RadioConfig::default()
             };
             let modem = Arc::new(Modem::new(OfdmParams::narrow(), cfg.txdelay_s));
             let (ptt, out) = (Box::new(FakePtt(cards[i].clone())), FakeOut(cards[i].clone()));
-            RadioEngine::from_config(&cfg, modem, ptt, out, i as u32 + 1)
+            RadioEngine::from_config(&cfg, modem, ptt, out, i as u32 + 1).unwrap()
         })
         .collect();
     for e in &eng {
@@ -372,4 +373,43 @@ fn session_through_a_digipeater_over_fake_sound_cards() {
     for e in &eng {
         assert!(!e.log.iter().any(|l| l.contains("watchdog")), "{:?}", e.log);
     }
+}
+
+/// An engine built from `cfg` on a fake sound card.
+fn engine_from(cfg: &RadioConfig) -> std::io::Result<RadioEngine<FakeOut>> {
+    let card = Shared::default();
+    let modem = Arc::new(Modem::new(OfdmParams::narrow(), 0.1));
+    RadioEngine::from_config(cfg, modem, Box::new(FakePtt(card.clone())), FakeOut(card), 1)
+}
+
+#[test]
+fn default_config_gives_the_links_defaults() {
+    let eng = engine_from(&RadioConfig::default()).unwrap();
+    let (got, want) = (eng.station.link_config(), LinkConfig::default());
+    assert_eq!((got.hop_margin_s, got.max_level), (want.hop_margin_s, want.max_level));
+}
+
+#[test]
+fn bad_config_is_refused() {
+    let ok = RadioConfig::default;
+    let bad = [
+        (RadioConfig { hop_margin_s: -0.1, ..ok() }, "hop margin must be from 0 to 10 seconds"),
+        (RadioConfig { hop_margin_s: 10.5, ..ok() }, "hop margin must be from 0 to 10 seconds"),
+        (RadioConfig { hop_margin_s: f64::NAN, ..ok() }, "hop margin must be from 0 to 10 seconds"),
+        (RadioConfig { max_level: 7, ..ok() }, "max level must be from 0 to 6"),
+        (RadioConfig { txdelay_s: f32::NAN, ..ok() }, "txdelay must be 0 or more"),
+        (RadioConfig { txtail_s: -0.1, ..ok() }, "txtail must be 0 or more"),
+        (RadioConfig { tx_gain: f32::INFINITY, ..ok() }, "tx gain must be 0 or more"),
+        (
+            RadioConfig { digi_calls: vec!["LA3DDD".into(), " LA4EEE".into()], ..ok() },
+            "digipeater \" LA4EEE\": not a valid call sign",
+        ),
+        (RadioConfig { digi_calls: vec!["".into()], ..ok() }, "digipeater \"\": not a valid call sign"),
+    ];
+    for (cfg, why) in bad {
+        assert_eq!(cfg.check().unwrap_err().to_string(), why);
+        assert_eq!(engine_from(&cfg).err().map(|e| e.to_string()).as_deref(), Some(why));
+    }
+    let edge = RadioConfig { hop_margin_s: 10.0, max_level: 6, digi_calls: vec!["la3ddd-7".into()], ..ok() };
+    assert!(engine_from(&edge).is_ok());
 }

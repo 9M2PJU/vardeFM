@@ -9,6 +9,7 @@
 //! [`RadioEngine`] holds that logic with the sound card output and PTT behind
 //! traits, so it can be tested without hardware; [`run`] wires it to real devices.
 
+use crate::host::valid_call;
 use crate::level::{meter_line, LevelMeter, Verdict};
 use crate::server::{HostIn, HostPort};
 use crate::station::{HostOut, Station};
@@ -18,7 +19,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use vardefm_audio::{open_input, open_output, AudioOut, Channel, RATE};
-use vardefm_link::LinkConfig;
+use vardefm_link::{valid_hop_margin, LinkConfig, MAX_HOP_MARGIN_S};
 use vardefm_modem::{AudioLevel, Modem, OfdmParams, LEVELS};
 use vardefm_ptt::{Ptt, PttSpec};
 
@@ -50,6 +51,29 @@ pub struct RadioConfig {
     pub digi_calls: Vec<String>,
     /// Extra wait per digipeater hop on our own routed sessions.
     pub hop_margin_s: f64,
+}
+
+impl RadioConfig {
+    /// Refuses values the engine cannot run with. The command line checks its own
+    /// arguments; this is for a config built any other way.
+    pub fn check(&self) -> io::Result<()> {
+        let invalid = |what: String| Err(io::Error::new(io::ErrorKind::InvalidInput, what));
+        for (name, s) in [("txdelay", self.txdelay_s), ("txtail", self.txtail_s), ("tx gain", self.tx_gain)] {
+            if !(s.is_finite() && s >= 0.0) {
+                return invalid(format!("{name} must be 0 or more"));
+            }
+        }
+        if self.max_level as usize >= LEVELS.len() {
+            return invalid(format!("max level must be from 0 to {}", LEVELS.len() - 1));
+        }
+        if !valid_hop_margin(self.hop_margin_s) {
+            return invalid(format!("hop margin must be from 0 to {MAX_HOP_MARGIN_S} seconds"));
+        }
+        if let Some(c) = self.digi_calls.iter().find(|c| !valid_call(c)) {
+            return invalid(format!("digipeater {c:?}: not a valid call sign"));
+        }
+        Ok(())
+    }
 }
 
 /// Seconds per line of `--levels` output.
@@ -159,8 +183,9 @@ impl<S: AudioSink> RadioEngine<S> {
     }
 
     /// An engine set up as `cfg` asks: the link's limits and hop margin, gain, logging
-    /// and the digipeater's call signs.
-    pub fn from_config(cfg: &RadioConfig, modem: Arc<Modem>, ptt: Box<dyn Ptt>, out: S, seed: u32) -> Self {
+    /// and the digipeater's call signs. Fails if `cfg` does not pass [`RadioConfig::check`].
+    pub fn from_config(cfg: &RadioConfig, modem: Arc<Modem>, ptt: Box<dyn Ptt>, out: S, seed: u32) -> io::Result<Self> {
+        cfg.check()?;
         let link = LinkConfig {
             max_level: cfg.max_level,
             start_level: cfg.max_level.min(1),
@@ -172,7 +197,7 @@ impl<S: AudioSink> RadioEngine<S> {
         engine.show_levels = cfg.show_levels;
         engine.record = cfg.record.clone();
         engine.station.set_digi(&cfg.digi_calls);
-        engine
+        Ok(engine)
     }
 
     /// Warn about a bad receive level, at most every [`LEVEL_WARN_EVERY_S`] seconds.
@@ -293,6 +318,8 @@ impl<S: AudioSink> RadioEngine<S> {
 
 /// Run until `stop` is set. Returns an error if a device cannot be opened.
 pub fn run(cfg: RadioConfig, stop: Arc<AtomicBool>) -> io::Result<()> {
+    // Before any device is opened.
+    cfg.check()?;
     let params = OfdmParams::by_name(&cfg.mode).ok_or_else(|| io::Error::other("mode must be narrow or wide"))?;
     let modem = Arc::new(Modem::new(params, cfg.txdelay_s));
     let ptt = vardefm_ptt::open(&cfg.ptt)?;
@@ -318,7 +345,7 @@ pub fn run(cfg: RadioConfig, stop: Arc<AtomicBool>) -> io::Result<()> {
         println!("  levels   : every {LEVEL_WINDOW_S} s while idle; set the radio volume so bursts peak near -6 dBFS");
     }
 
-    let mut engine = RadioEngine::from_config(&cfg, modem, ptt, output, link_seed());
+    let mut engine = RadioEngine::from_config(&cfg, modem, ptt, output, link_seed())?;
     while !stop.load(Ordering::Relaxed) {
         let chunk = input.rx.recv_timeout(Duration::from_millis(50)).ok();
         let host_in: Vec<HostIn> = port.inbox.try_iter().collect();

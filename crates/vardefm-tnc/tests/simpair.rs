@@ -394,6 +394,10 @@ fn start_refuses_bad_digipeater_settings() {
     for same in [&["LA3DDD", "LA3DDD"], &["LA3DDD", "la3ddd"]] {
         assert_eq!(refused(cfg(same, 0.5)).as_deref(), Some("each digipeater needs its own call sign"));
     }
+    for (padded, shown) in [(" LA3DDD", "\" LA3DDD\""), ("LA3DDD ", "\"LA3DDD \""), ("", "\"\"")] {
+        let why = format!("digipeater {shown}: not a valid call sign");
+        assert_eq!(refused(cfg(&["LA3DDD", padded], 0.5)), Some(why));
+    }
     for margin in [-1.0, 10.5, f64::NAN] {
         assert_eq!(refused(cfg(&["LA3DDD"], margin)).as_deref(), Some("hop margin must be from 0 to 10 seconds"));
     }

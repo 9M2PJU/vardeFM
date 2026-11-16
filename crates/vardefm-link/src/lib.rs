@@ -202,7 +202,8 @@ enum Phase {
     /// Nothing to do until something happens.
     Idle,
     /// Transmit a burst of `kind` at time `at`. `initiated`: we start the exchange
-    /// ourselves (not answering the peer), so give way if the channel turns busy.
+    /// ourselves (not answering the peer), or it is a retry: give way if the channel
+    /// turns busy.
     Respond { at: f64, kind: Kind, initiated: bool },
     /// Our burst is on the air. `initiated` as for `Respond`.
     Sending { kind: Kind, retry: bool, initiated: bool },
@@ -770,11 +771,14 @@ impl Link {
                             let kind = if s.closing.is_some() && s.disc_tries > 0 { Kind::Disc } else { Kind::Data };
                             // Through digipeaters, both ends may retry while a repeat is
                             // on the air; a wider spread keeps them from colliding again.
-                            // There a busy channel is most likely the peer's burst coming
-                            // through, so the retry gives way to it and answers it instead.
+                            // A busy channel is then most likely the peer's burst (its
+                            // retry, or coming through a digipeater), so the retry gives
+                            // way to it and answers it instead. Without that, two ends
+                            // that retry together collide on every retry: their waits
+                            // differ by less than a burst.
                             let hops = s.route.hops();
                             let at = now + backoff * Self::retry_spread(hops);
-                            s.phase = Phase::Respond { at, kind, initiated: hops > 0 };
+                            s.phase = Phase::Respond { at, kind, initiated: true };
                         } else {
                             s.phase = Phase::Idle;
                         }

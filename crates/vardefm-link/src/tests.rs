@@ -1082,10 +1082,9 @@ fn hop_margin_limits() {
 #[test]
 fn digipeater_carries_its_own_session_while_relaying() {
     // A talks to B through D, while D itself talks to C. A, B and C hear only D.
-    // This shows that both sessions can run and that their data is not mixed up, not
-    // that they always do: C and A or B cannot hear each other, and their bursts
-    // collide at D. Over seeds 44..124, D's own session was dropped in 7 runs (see the
-    // limits in docs/PROTOCOL.md).
+    // C and A or B cannot hear each other, and their bursts collide at D, so both
+    // sessions retry a lot (see the limits in docs/PROTOCOL.md). Over seeds 44..124,
+    // every run finishes.
     for seed in 44..48 {
         let digis = ["LA3DDD"];
         let mut net = Net::chain(seed, 0.0, &digis, LinkConfig::default());
@@ -1123,4 +1122,28 @@ fn digipeater_carries_its_own_session_while_relaying() {
         }
         assert!(net.nodes[d].node.repeats() >= 4, "seed {seed}: {} repeats", net.nodes[d].node.repeats());
     }
+}
+
+#[test]
+fn direct_ends_retrying_together_recover() {
+    // Two stations that hear each other, no digipeater. Once connected and quiet, both
+    // get 2 kB at the same instant, so both start a burst of their own and some of
+    // these collide. Then both retry after the same wait, give or take the back-off,
+    // and without giving way to each other every retry collides until the session drops.
+    let mut dropped = Vec::new();
+    for seed in 0..40 {
+        let mut net = Net::new(seed, 0.0, 0.0);
+        net.nodes[A].node.link.connect(0.0, "LA1AAA", "LA2BBB-1", &[]).unwrap();
+        net.run_until(60.0, |n| n.both_connected());
+        net.run_until(60.0, |n| n.now > 15.0);
+        let (a, b) = (data(2000, seed), data(2000, seed + 1));
+        net.nodes[A].node.link.send_data(&a);
+        net.nodes[1].node.link.send_data(&b);
+        let lost = |n: &Net| n.has(A, &LinkEvent::Disconnected) || n.has(1, &LinkEvent::Disconnected);
+        net.run_until(300.0, |n| lost(n) || (n.nodes[A].host_rx == b && n.nodes[1].host_rx == a));
+        if lost(&net) {
+            dropped.push(seed);
+        }
+    }
+    assert!(dropped.is_empty(), "sessions dropped for seeds {dropped:?}");
 }

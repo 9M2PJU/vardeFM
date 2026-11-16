@@ -157,9 +157,14 @@ digipeaters, in order). The digipeater prints an `rpt` line for each burst it re
 Every burst goes on the air once per digipeater, so a session through one digipeater
 runs at about half speed, and a lost burst takes longer to recover. The stations at the
 ends wait for the repeats before they retry. If the digipeater is slow, for example a
-Raspberry Pi that takes long to decode, or one keyed by VOX with a long hang time, raise
-`--hop-margin` (default 0.5 s per digipeater) on the two end stations. Digipeating only
-works between VardeFM stations; VARA FM digipeaters cannot repeat VardeFM.
+Raspberry Pi that takes long to decode, raise `--hop-margin` (default 0.5 s per
+digipeater, at most 10 s) on the two end stations, to the same value on both. An answer
+passes the digipeater twice, so the margin has to be about twice the digipeater's extra
+delay. A long VOX hang on the digipeater is a different problem, and the hop margin does
+not help with it: its neighbours answer 0.2 s after its repeat ends, while it is still
+keyed. Shorten the hang or raise the neighbours' `--txdelay`, as in section 3.
+Digipeating only works between VardeFM stations; VARA FM digipeaters cannot repeat
+VardeFM.
 
 ## 6. What is not done yet
 

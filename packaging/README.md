@@ -189,7 +189,7 @@ Important options:
 | `--quiet` | | Do not print a line per transmission. |
 | `--record <folder>` | | Save every transmission as a WAV file. |
 | `--digi <callsign>` | | Also act as a digipeater for this call sign (repeat for more). Works with no program connected. |
-| `--hop-margin <seconds>` | `0.5` | Extra wait per digipeater on your own `CONNECT ... VIA` sessions. Raise it if a slow digipeater makes transfers retry. |
+| `--hop-margin <seconds>` | `0.5` | Extra wait per digipeater on sessions through digipeaters, whether you call or are called. Raise it, on both stations, if a slow digipeater makes transfers retry (at most 10). |
 
 `vardefm modem --help` lists every option.
 

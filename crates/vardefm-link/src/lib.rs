@@ -1,8 +1,9 @@
 //! VardeFM ARQ link layer.
 //!
 //! A pure state machine: the caller passes in the current time, received bursts,
-//! host commands and whether the channel is busy. It asks [`Link::poll`] what to
-//! transmit, and reads host notifications from [`Link::take_events`].
+//! host commands and whether the channel is busy. It asks [`Node::poll`] what to
+//! transmit, and reads host notifications from [`Link::take_events`]. A [`Node`] is a
+//! [`Link`] with the radio's side of it: bursts in, bursts out.
 //!
 //! # Protocol summary
 //! - **Connect:** the caller sends `ConnectReq` (session id + call signs) and the
@@ -32,7 +33,9 @@
 //!   and wait longer for answers.
 
 mod digi;
+mod node;
 pub use digi::Digipeater;
+pub use node::Node;
 
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::Arc;
@@ -67,6 +70,11 @@ pub fn level_by_snr(modem: &Modem, snr_db: f32, rx_level: u8) -> u8 {
 const SEGMENT_HEADER: usize = 4;
 /// Largest random back-off before a burst we start (a routed retry's is spread wider).
 const RETRY_BACKOFF_S: f64 = 0.4;
+/// Largest random addition to the wait between connect requests.
+const CONNECT_JITTER_S: f64 = 0.5;
+/// Largest `hop_margin_s`. A digipeater does not know the end stations' margin, so the
+/// lifetimes of its sessions are sized for this one.
+pub const MAX_HOP_MARGIN_S: f64 = 10.0;
 const OFFSET_MOD: u64 = 1 << 24;
 /// Segment length byte of a codeword a digipeater could not decode (a real segment
 /// holds at most 242 bytes). The receiver treats it as a failed codeword.
@@ -91,7 +99,8 @@ pub struct LinkConfig {
     pub start_level: u8,
     pub max_level: u8,
     /// Extra wait per digipeater hop, beyond airtime and turnaround: a digipeater's
-    /// decoding time, PTT/VOX key-up and squelch tail.
+    /// decoding time and the delay before its transmitter is up. From 0 to
+    /// [`MAX_HOP_MARGIN_S`].
     pub hop_margin_s: f64,
 }
 
@@ -267,6 +276,11 @@ pub struct Link {
     max_burst_s: f64,
     last_tx: TxInfo,
     pub stats: LinkStats,
+}
+
+/// True if `s` can be a `hop_margin_s`: from 0 to [`MAX_HOP_MARGIN_S`].
+pub fn valid_hop_margin(s: f64) -> bool {
+    (0.0..=MAX_HOP_MARGIN_S).contains(&s)
 }
 
 fn norm_call(c: &str) -> String {
@@ -459,7 +473,7 @@ impl Link {
     }
 
     /// Handle a decoded burst.
-    pub fn on_burst(&mut self, now: f64, rx: &RxBurst) {
+    pub(crate) fn on_burst(&mut self, now: f64, rx: &RxBurst) {
         let voided;
         let rx = if has_void(rx) {
             voided = without_voids(rx);
@@ -684,7 +698,7 @@ impl Link {
     // ------------------------------------------------------------ transmit
 
     /// Called regularly while not transmitting. Returns a burst to transmit now.
-    pub fn poll(&mut self, now: f64, busy: bool) -> Option<Burst> {
+    pub(crate) fn poll(&mut self, now: f64, busy: bool) -> Option<Burst> {
         if let Some(b) = self.oneshot.take() {
             self.last_tx = TxInfo { kind: b.header.kind, ..TxInfo::default() };
             self.stats.bursts_sent += 1;
@@ -812,12 +826,12 @@ impl Link {
     }
 
     /// Called when the burst returned by `poll` has finished transmitting.
-    pub fn tx_done(&mut self, now: f64) {
+    pub(crate) fn tx_done(&mut self, now: f64) {
         let timeout = self.cfg.response_timeout_s;
         let connect_s = self.modem.burst_seconds(0, 1) as f64;
         // Draw the retry jitter only while connecting, as before digipeating, so direct
         // sessions keep their random sequence.
-        let jitter = if matches!(self.state, State::Connecting { .. }) { self.rand_s(0.5) } else { 0.0 };
+        let jitter = if matches!(self.state, State::Connecting { .. }) { self.rand_s(CONNECT_JITTER_S) } else { 0.0 };
         let (wait, echo) = match &self.state {
             State::Connecting { digis, .. } => (timeout + self.relay_s(digis.len() as u8, connect_s, connect_s), 0.0),
             State::Connected(s) => {

@@ -150,7 +150,8 @@ enum Cmd {
         /// Act as a digipeater for this call sign (repeat --digi or separate with commas); works with no host connected
         #[arg(long, value_delimiter = ',')]
         digi: Vec<String>,
-        /// Extra seconds to wait per digipeater hop on our own CONNECT ... VIA sessions (digipeater decoding time, VOX)
+        /// Extra seconds to wait per digipeater on sessions through digipeaters, whether we call or are
+        /// called (0 to 10; for a digipeater that is slow to decode or to key up)
         #[arg(long, default_value_t = 0.5)]
         hop_margin: f64,
     },
@@ -238,14 +239,15 @@ enum Cmd {
         /// Command port of station B (data port = +1)
         #[arg(long, default_value_t = 8310)]
         b_port: u16,
-        /// Save every transmission as NNNN_<A|B>_tx.wav / _rx.wav in this folder
+        /// Save every transmission as NNNN_<A|B>_tx.wav / _rx.wav in this folder; with --digi as
+        /// NNNN_<from>_tx.wav / NNNN_<from>_rx_<to>.wav, the digipeaters being D1 and D2
         #[arg(long)]
         record: Option<String>,
         /// Put a digipeater with this call sign between A and B (repeat for up to 2, in order from A);
         /// each station then hears only its neighbours
         #[arg(long, value_delimiter = ',')]
         digi: Vec<String>,
-        /// Extra seconds A and B wait per digipeater hop
+        /// Extra seconds A and B wait per digipeater (0 to 10)
         #[arg(long, default_value_t = 0.5)]
         hop_margin: f64,
     },
@@ -401,7 +403,7 @@ fn main() {
                 verbose: !quiet,
                 show_levels: levels,
                 digi_calls,
-                hop_margin_s: hop_margin,
+                hop_margin_s: checked_hop_margin(hop_margin),
             };
             let stop = radio_cmds::stop_flag();
             if let Err(err) = vardefm_tnc::radio::run(cfg, stop) {
@@ -459,7 +461,7 @@ fn main() {
                 record: record.map(Into::into),
                 verbose: true,
                 digis,
-                hop_margin_s: hop_margin,
+                hop_margin_s: checked_hop_margin(hop_margin),
             };
             let sp = SimPair::start(cfg.clone()).unwrap_or_else(|e| die(&e.to_string()));
             println!(
@@ -503,6 +505,14 @@ fn main() {
             println!("{} frames decoded", frames.len());
         }
     }
+}
+
+/// `--hop-margin`; exits if it is out of range.
+fn checked_hop_margin(s: f64) -> f64 {
+    if !vardefm_link::valid_hop_margin(s) {
+        die(&format!("--hop-margin must be from 0 to {} seconds", vardefm_link::MAX_HOP_MARGIN_S));
+    }
+    s
 }
 
 /// Upper-cased digipeater call signs from `--digi`; exits on an invalid call or too many.

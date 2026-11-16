@@ -378,3 +378,28 @@ fn connect_via_digipeater() {
     println!("via digipeater: airtime A {:.1} s / D1 {:.1} s / B {:.1} s", st.airtime[0], st.airtime[1], st.airtime[2]);
     sp.stop();
 }
+
+#[test]
+fn start_refuses_bad_digipeater_settings() {
+    let cfg = |digis: &[&str], hop_margin_s: f64| SimPairConfig {
+        a_port: 0,
+        b_port: 0,
+        verbose: false,
+        digis: digis.iter().map(|d| d.to_string()).collect(),
+        hop_margin_s,
+        ..SimPairConfig::default()
+    };
+    let refused = |c: SimPairConfig| SimPair::start(c).err().map(|e| e.to_string());
+    assert_eq!(refused(cfg(&["LA3A", "LA3B", "LA3C"], 0.5)).as_deref(), Some("at most two digipeaters"));
+    for same in [&["LA3DDD", "LA3DDD"], &["LA3DDD", "la3ddd"]] {
+        assert_eq!(refused(cfg(same, 0.5)).as_deref(), Some("each digipeater needs its own call sign"));
+    }
+    for (padded, shown) in [(" LA3DDD", "\" LA3DDD\""), ("LA3DDD ", "\"LA3DDD \""), ("", "\"\"")] {
+        let why = format!("digipeater {shown}: not a valid call sign");
+        assert_eq!(refused(cfg(&["LA3DDD", padded], 0.5)), Some(why));
+    }
+    for margin in [-1.0, 10.5, f64::NAN] {
+        assert_eq!(refused(cfg(&["LA3DDD"], margin)).as_deref(), Some("hop margin must be from 0 to 10 seconds"));
+    }
+    assert!(refused(cfg(&["LA3DDD", "LA4EEE"], 10.0)).is_none());
+}

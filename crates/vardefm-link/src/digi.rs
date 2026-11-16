@@ -18,22 +18,22 @@ use super::{norm_call, parse_calls_payload, void_codeword};
 use std::collections::HashMap;
 use vardefm_modem::{Burst, Kind, RxBurst};
 
-/// A session is forgotten after this long without a burst. Well above the end
-/// stations' keepalive on a routed session, even with a large hop margin.
+// The three lifetimes below must outlast the end stations' timers at the largest hop
+// margin (`MAX_HOP_MARGIN_S`); `lifetimes_outlast_the_end_stations_timers` checks them
+// against the link's own waits.
+
+/// A session is forgotten after this long without a burst: longer than a quiet
+/// session goes before the called station probes it.
 const IDLE_EXPIRY_S: f64 = 600.0;
 /// After the closing DiscAck, kept this long after the last Disc or DiscAck we repeat,
 /// so a resent Disc and its answer still get through.
-const CLOSE_EXPIRY_S: f64 = 30.0;
+const CLOSE_EXPIRY_S: f64 = 60.0;
 /// Life of a session not yet answered (no ConnectAck or burst from the called station
 /// repeated). A stale entry would repeat the bursts of a later routed session that
 /// reuses its id if we missed that session's connect bursts, so it must not wait
-/// for `IDLE_EXPIRY_S`. Every ConnectReq naming us renews it, so it only has to
-/// outlast one of the caller's attempts: the caller resends after
-/// `1.2 s + n · (2 · connect burst + 2 · 0.2 s + hop margin)` plus up to 0.5 s of
-/// jitter. With 2 digipeaters, the 1.85 s narrow connect burst and a hop margin of
-/// 10 s (well above the 6 s of a slow VOX-keyed path) that is 29.4 s, about 32 s from
-/// one request to the next. 90 s still covers two attempts with room to spare, so one
-/// request we fail to decode does not drop a session still connecting.
+/// for `IDLE_EXPIRY_S`. Every ConnectReq naming us renews it, so it has to outlast
+/// two of the caller's attempts: one request we fail to decode must not drop a
+/// session still connecting.
 const UNCONFIRMED_EXPIRY_S: f64 = 90.0;
 
 #[derive(Clone, Debug)]
@@ -70,7 +70,7 @@ pub struct Digipeater {
     table: HashMap<u8, Entry>,
     /// Repeats waiting for their time, in order.
     queue: Vec<(f64, Burst)>,
-    pub repeated: u64,
+    repeated: u64,
 }
 
 impl Digipeater {
@@ -85,13 +85,15 @@ impl Digipeater {
         }
     }
 
-    pub fn calls(&self) -> &[String] {
-        &self.calls
+    /// Bursts repeated so far.
+    pub fn repeated(&self) -> u64 {
+        self.repeated
     }
 
-    /// Sessions currently relayed.
-    pub fn sessions(&self) -> usize {
-        self.table.len()
+    /// Sessions relayed at `now`.
+    #[cfg(test)]
+    fn sessions(&self, now: f64) -> usize {
+        self.table.values().filter(|e| e.expires > now).count()
     }
 
     /// Handle a decoded burst; queue its repeat if it is ours to repeat.
@@ -183,8 +185,9 @@ impl Digipeater {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::calls_payload;
-    use vardefm_modem::{AudioLevel, Header, Modem, FLAG_UP, MAX_DIGIS};
+    use crate::{calls_payload, Link, LinkConfig, CONNECT_JITTER_S, MAX_HOP_MARGIN_S, RETRY_BACKOFF_S};
+    use std::sync::Arc;
+    use vardefm_modem::{AudioLevel, Header, Modem, OfdmParams, FLAG_UP, MAX_DIGIS};
 
     /// A burst of a direct session: route field 0, no UP, as released versions send.
     fn direct(kind: Kind, session: u8, payload: Vec<Option<Vec<u8>>>) -> RxBurst {
@@ -251,7 +254,7 @@ mod tests {
         assert!(repeat(&mut d, 0.0, &rx(Kind::Data, 7, false, 0, vec![])).is_none());
         // A direct (VFM1) request names no digipeater.
         assert!(repeat(&mut d, 0.0, &direct_connect(Kind::ConnectReq, 8)).is_none());
-        assert_eq!(d.sessions(), 0);
+        assert_eq!(d.sessions(0.0), 0);
     }
 
     #[test]
@@ -269,7 +272,7 @@ mod tests {
         // A ConnectReq whose codeword failed cannot be repeated, and tells us nothing
         // about the session: the entry stays.
         assert!(repeat(&mut d, 2.0, &rx(Kind::ConnectReq, 7, false, 0, vec![None])).is_none());
-        assert_eq!(d.sessions(), 1);
+        assert_eq!(d.sessions(2.0), 1);
     }
 
     #[test]
@@ -339,7 +342,7 @@ mod tests {
         // says it is direct, so it cannot be mistaken for ours and tells us nothing.
         let mut d = stale_entry();
         assert!(repeat(&mut d, 3.0, &direct_connect(Kind::ConnectReq, 7)).is_none());
-        assert_eq!(d.sessions(), 1);
+        assert_eq!(d.sessions(3.0), 1);
         direct_data_not_repeated(&mut d, 3.0);
         // Our caller's resent request is still repeated.
         assert_eq!(repeat(&mut d, 10.0, &connect_req(7, &["LA3D1"], 0)).unwrap().hop(), 1);
@@ -350,7 +353,7 @@ mod tests {
         // Only the called station's ConnectAck of the direct session is heard.
         let mut d = stale_entry();
         assert!(repeat(&mut d, 3.0, &direct_connect(Kind::ConnectAck, 7)).is_none());
-        assert_eq!(d.sessions(), 1);
+        assert_eq!(d.sessions(3.0), 1);
         direct_data_not_repeated(&mut d, 3.0);
     }
 
@@ -362,7 +365,7 @@ mod tests {
         assert!(repeat(&mut d, 10.0, &direct_connect(Kind::ConnectReq, 7)).is_none());
         assert!(repeat(&mut d, 12.0, &direct_connect(Kind::ConnectAck, 7)).is_none());
         direct_data_not_repeated(&mut d, 12.0);
-        assert_eq!(d.sessions(), 1);
+        assert_eq!(d.sessions(15.0), 1);
         // Ours keeps being repeated both ways.
         let down = repeat(&mut d, 20.0, &rx(Kind::Data, 7, false, 0, vec![])).expect("repeats the caller");
         assert_eq!((down.hop(), down.up(), down.routed()), (1, false, true));
@@ -375,12 +378,12 @@ mod tests {
         let mut d = stale_entry();
         // A new routed session through other digipeaters, heard as the request and its repeat.
         assert!(repeat(&mut d, 3.0, &connect_req(7, &["LA3D8", "LA3D9"], 0)).is_none());
-        assert_eq!(d.sessions(), 0);
+        assert_eq!(d.sessions(3.0), 0);
         assert!(repeat(&mut d, 4.0, &connect_req(7, &["LA3D8", "LA3D9"], 1)).is_none());
         // Its acknowledgement as well: a fresh stale entry, then only the ConnectAck heard.
         let mut d = stale_entry();
         assert!(repeat(&mut d, 3.0, &connect_ack(7, &["LA3D8", "LA3D9"], 0)).is_none());
-        assert_eq!(d.sessions(), 0);
+        assert_eq!(d.sessions(3.0), 0);
         assert!(repeat(&mut d, 5.0, &rx(Kind::Data, 7, false, 0, vec![])).is_none());
     }
 
@@ -402,12 +405,12 @@ mod tests {
             assert!(repeat(&mut d, t, &connect_req(7, &["LA3D1"], 0)).is_some(), "resent request at {t}");
         }
         assert!(repeat(&mut d, 160.0, &rx(Kind::ConnectReq, 7, false, 0, vec![None])).is_none());
-        assert_eq!(d.sessions(), 1, "one undecoded request");
+        assert_eq!(d.sessions(160.0), 1, "one undecoded request");
         assert!(repeat(&mut d, 192.0, &connect_req(7, &["LA3D1"], 0)).is_some());
         // Once the caller gives up, the entry does not wait for IDLE_EXPIRY_S.
         let t = 192.0 + UNCONFIRMED_EXPIRY_S + 1.0;
         assert!(repeat(&mut d, t, &rx(Kind::Data, 7, false, 0, vec![])).is_none());
-        assert_eq!(d.sessions(), 0);
+        assert_eq!(d.sessions(t), 0);
     }
 
     #[test]
@@ -419,10 +422,12 @@ mod tests {
         for (t, kind) in [(10.0, Kind::Data), (40.0, Kind::Data), (70.0, Kind::Disc), (80.0, Kind::DiscAck)] {
             assert!(repeat(&mut d, t, &rx(kind, 7, false, 0, vec![])).is_none(), "{kind:?} at {t} repeated");
         }
-        assert_eq!(d.sessions(), 1);
-        // They do not keep the entry alive either.
+        assert_eq!(d.sessions(80.0), 1);
+        // They do not keep the entry alive either. It stops counting when it expires,
+        // not only when the next burst clears it out.
+        assert_eq!(d.sessions(UNCONFIRMED_EXPIRY_S + 1.0), 0);
         d.on_burst(UNCONFIRMED_EXPIRY_S + 1.0, &rx(Kind::Data, 7, false, 0, vec![]));
-        assert_eq!(d.sessions(), 0);
+        assert_eq!(d.sessions(UNCONFIRMED_EXPIRY_S + 1.0), 0);
     }
 
     #[test]
@@ -449,10 +454,10 @@ mod tests {
         // Meanwhile only the close is repeated, from either end.
         assert!(repeat(&mut d, 120.0, &rx(Kind::Data, 7, false, 0, vec![])).is_none(), "Data after the close");
         assert!(repeat(&mut d, 121.0, &rx(Kind::Data, 7, true, 0, vec![])).is_none(), "Data after the close");
-        assert_eq!(d.sessions(), 1);
+        assert_eq!(d.sessions(121.0), 1);
         let gone = 115.0 + CLOSE_EXPIRY_S + 1.0;
         assert!(repeat(&mut d, gone, &rx(Kind::Disc, 7, false, 0, vec![])).is_none(), "kept past the close window");
-        assert_eq!(d.sessions(), 0);
+        assert_eq!(d.sessions(gone), 0);
     }
 
     #[test]
@@ -466,6 +471,34 @@ mod tests {
         assert!(repeat(&mut d, 115.0, &connect_ack(7, &["LA3D1"], 0)).is_some());
         let t = 115.0 + CLOSE_EXPIRY_S + 60.0;
         assert!(repeat(&mut d, t, &rx(Kind::Data, 7, false, 0, vec![])).is_some(), "the new session is live");
+    }
+
+    #[test]
+    fn lifetimes_outlast_the_end_stations_timers() {
+        for params in [OfdmParams::narrow(), OfdmParams::wide()] {
+            let modem = Arc::new(Modem::new(params, 0.1));
+            let cfg = LinkConfig { hop_margin_s: MAX_HOP_MARGIN_S, ..LinkConfig::default() };
+            let link = Link::new(modem.clone(), cfg.clone(), 1);
+            let (connect_s, disc_s) = (modem.burst_seconds(0, 1) as f64, modem.burst_seconds(0, 0) as f64);
+            for n in 1..=MAX_DIGIS as u8 {
+                let what = format!("{}, {n} digipeaters", modem.ofdm.p.name);
+                // Connecting: two of the caller's requests in a row, start to start. We
+                // hear each after the same delay, so that is also what we see.
+                let attempt =
+                    connect_s + cfg.response_timeout_s + link.relay_s(n, connect_s, connect_s) + CONNECT_JITTER_S;
+                assert!(UNCONFIRMED_EXPIRY_S > 2.0 * attempt, "{what}: {attempt:.1} s per attempt");
+                // Quiet: the called station probes last, 1.5 keepalives after it last
+                // heard the caller, whose burst passed us up to a path's length earlier.
+                let path = n as f64 * (link.max_burst_s + cfg.turnaround_s + cfg.hop_margin_s);
+                let quiet = 1.5 * link.keepalive_s(n) + RETRY_BACKOFF_S + path;
+                assert!(IDLE_EXPIRY_S > quiet, "{what}: quiet for {quiet:.1} s");
+                // Closing: the DiscAck is lost after us, and the Disc comes again. At the
+                // earliest we repeated the DiscAck right after the first Disc.
+                let resent = disc_s + link.response_wait(n, disc_s) + RETRY_BACKOFF_S * Link::retry_spread(n);
+                assert!(CLOSE_EXPIRY_S > resent, "{what}: Disc again after {resent:.1} s");
+                println!("{what}: attempt {attempt:.1} s, quiet {quiet:.1} s, Disc again {resent:.1} s");
+            }
+        }
     }
 
     #[test]

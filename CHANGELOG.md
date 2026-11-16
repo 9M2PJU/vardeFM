@@ -39,6 +39,9 @@ run the same minor version.
   the tone came back abruptly and the band filter read that as busy for 150 ms after
   every burst, which held back the modem's next transmission. A busy hold from before a
   transmission no longer carries over it. (#10)
+- On the radio, session ids and retry delays are seeded from the operating system's
+  randomness. The process id alone could repeat between stations started from the same
+  system image, which then drew the same session ids.
 
 ### Fixed
 - A NaN, an Inf or a sample far beyond full scale from the sound card no longer loses a

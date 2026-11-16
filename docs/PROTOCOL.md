@@ -280,7 +280,7 @@ not on-air compatible with VARA FM digipeaters.
   It learns a session from a routed ConnectReq or ConnectAck that names one of its call
   signs, and keeps it by session id until 10 minutes pass without a burst it repeats.
   Once it has repeated a DiscAck the session is over: it repeats only a resent Disc or
-  DiscAck, forgets the session 30 s after the last of them, and takes a connect burst
+  DiscAck, forgets the session 60 s after the last of them, and takes a connect burst
   under that id as a new session. Until it has repeated the called station's answer
   (a ConnectAck or a burst with UP = 1) it keeps the session only 90 s, renewed by each
   request, and repeats nothing else from the caller's side, so an unanswered request does
@@ -291,7 +291,9 @@ not on-air compatible with VARA FM digipeaters.
   the caller) repeats a burst with UP = 0 and hop *i* − 1, or with UP = 1 and hop
   *n* − *i*.
   It sends the burst again 0.2 s after it ends, at the same level, with the route field
-  plus one and every other field unchanged, whether or not the channel is busy. A path
+  plus one and every other field unchanged, whether or not the channel is busy. A
+  digipeater with a session of its own sends repeats first, and starts no burst of its
+  own while a repeat is waiting for its 0.2 s. A path
   may name one station more than once (the same call twice, or two calls of one
   station). It never hears its own repeat, so when it holds the next positions in a row
   it passes them all in one repeat, adding one to the route field for each.
@@ -313,8 +315,11 @@ not on-air compatible with VARA FM digipeaters.
   burst and then the answer, and the stations at the ends may hear none of the middle
   repeats. A station therefore waits
   `1.2 s + n · (our burst + longest possible burst + 2 · 0.2 s + hop margin)` before it
-  resends. The hop margin (default 0.5 s, `--hop-margin`) covers a digipeater's decoding
-  time and radio delays such as VOX hang. That is about 11 s and 20.5 s for 1 and 2
+  resends. The hop margin (default 0.5 s, `--hop-margin`, at most 10 s) covers a
+  digipeater's decoding time and the delay before its transmitter is up. An answer passes
+  each digipeater twice, so it has to be about twice a digipeater's extra delay, and both
+  ends need the same value. It does not cover a VOX hang: the neighbours still answer
+  0.2 s after a repeat ends. The wait is about 11 s and 20.5 s for 1 and 2
   digipeaters in narrow mode after a full burst (10 and 19 s wide). Connect
   retries are spaced the same way with the connect bursts' own length. Retries are spread
   by a random 0–0.4 s times (1 + 2n), and give way while the channel is busy: through
@@ -332,14 +337,19 @@ not on-air compatible with VARA FM digipeaters.
   caller's retry and answers it. The wait is about 21 s and 36.5 s for 1 and 2
   digipeaters in narrow mode after a short burst (17 and 32.5 s after a full burst;
   16–34 s wide). The caller's waits, direct sessions and `Disc` retries are unchanged
-  (a digipeater forgets the session 30 s after the DiscAck). A quiet routed link is probed
+  (a digipeater forgets the session 60 s after the DiscAck). A quiet routed link is probed
   after the larger of the usual keepalive and twice the called station's longest wait.
 - **Limits:** `req_level` is measured on the last hop only. A weak first hop still lowers
   the level through failed (void) codewords, but the level can settle above what that hop
   supports best. Each digipeater adds a full copy of every burst to the channel, so with
   *n* digipeaters on one frequency the throughput falls to about 1/(*n* + 1). Session ids
   are 8 bits: two routed sessions through one digipeater with the same id would confuse
-  it (a direct session with the same id cannot).
+  it (a direct session with the same id cannot). A digipeater's own session shares the
+  channel with the sessions it repeats, and its peer usually cannot hear the stations on
+  the other side, nor they the peer, so their bursts collide at the digipeater. Right
+  after a repeat the digipeater may also start a burst of its own over the answer, which
+  it cannot hear yet. Both sessions then retry a lot. With 2 kB each way on both at once,
+  a simulated digipeater lost its own session in 7 runs of 80.
 
 ## 4. Host interface
 

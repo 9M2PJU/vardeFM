@@ -1,8 +1,9 @@
 //! VardeFM ARQ link layer.
 //!
 //! A pure state machine: the caller passes in the current time, received bursts,
-//! host commands and whether the channel is busy. It asks [`Link::poll`] what to
-//! transmit, and reads host notifications from [`Link::take_events`].
+//! host commands and whether the channel is busy. It asks [`Node::poll`] what to
+//! transmit, and reads host notifications from [`Link::take_events`]. A [`Node`] is a
+//! [`Link`] with the radio's side of it: bursts in, bursts out.
 //!
 //! # Protocol summary
 //! - **Connect:** the caller sends `ConnectReq` (session id + call signs) and the
@@ -472,7 +473,7 @@ impl Link {
     }
 
     /// Handle a decoded burst.
-    pub fn on_burst(&mut self, now: f64, rx: &RxBurst) {
+    pub(crate) fn on_burst(&mut self, now: f64, rx: &RxBurst) {
         let voided;
         let rx = if has_void(rx) {
             voided = without_voids(rx);
@@ -697,7 +698,7 @@ impl Link {
     // ------------------------------------------------------------ transmit
 
     /// Called regularly while not transmitting. Returns a burst to transmit now.
-    pub fn poll(&mut self, now: f64, busy: bool) -> Option<Burst> {
+    pub(crate) fn poll(&mut self, now: f64, busy: bool) -> Option<Burst> {
         if let Some(b) = self.oneshot.take() {
             self.last_tx = TxInfo { kind: b.header.kind, ..TxInfo::default() };
             self.stats.bursts_sent += 1;
@@ -825,7 +826,7 @@ impl Link {
     }
 
     /// Called when the burst returned by `poll` has finished transmitting.
-    pub fn tx_done(&mut self, now: f64) {
+    pub(crate) fn tx_done(&mut self, now: f64) {
         let timeout = self.cfg.response_timeout_s;
         let connect_s = self.modem.burst_seconds(0, 1) as f64;
         // Draw the retry jitter only while connecting, as before digipeating, so direct

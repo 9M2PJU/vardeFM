@@ -1,9 +1,13 @@
 //! A station's link and its digipeater, sharing one radio.
+//!
+//! The radio's side of a [`Link`] (bursts heard, bursts to send) can only be reached
+//! through a [`Node`], so a station cannot drive its link past the digipeater.
 
 use crate::{Digipeater, Link};
 use vardefm_modem::{Burst, RxBurst};
 
 pub struct Node {
+    /// The host's side: commands, data and events.
     pub link: Link,
     digi: Option<Digipeater>,
     /// The burst on the air is a repeat, not the link's own.

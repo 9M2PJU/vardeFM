@@ -807,3 +807,141 @@ fn longer_resend_of_a_stored_segment_is_kept() {
     assert_eq!(got.len(), d.len(), "bytes of the longer resend were dropped");
     assert_eq!(got, d);
 }
+
+/// A ConnectReq or ConnectAck naming `digis`, with UP and the raw route field.
+fn connect_burst(kind: Kind, session: u8, calls: (&str, &str), digis: &[&str], up: bool, route: u8) -> RxBurst {
+    let flags = if up { FLAG_UP } else { 0 } | route << 2;
+    let header = Header { kind, session, ncw: 1, flags, ..Header::default() };
+    let payload = vec![Some(calls_payload(calls.0, calls.1, &via(digis)))];
+    RxBurst { header, payload, snr_db: 30.0, end_sample: 0, level: Default::default() }
+}
+
+#[test]
+fn connect_request_must_arrive_as_its_path_says() {
+    // A direct request is unrouted; one through n digipeaters has been repeated n
+    // times (route field n + 1). Neither carries UP. Any other header on the same
+    // payload is a copy heard part way, or not what it claims to be.
+    let modem = Arc::new(Modem::new(OfdmParams::narrow(), 0.1));
+    let listener = || {
+        let mut b = Link::new(modem.clone(), LinkConfig::default(), 1);
+        b.set_mycalls(vec!["LA2BBB-1".into()]);
+        b.set_listen(true);
+        b
+    };
+    let request = |digis: &[&str], (up, route): (bool, u8)| {
+        connect_burst(Kind::ConnectReq, 9, ("LA1AAA", "LA2BBB-1"), digis, up, route)
+    };
+    for (digis, own) in [(&[][..], (false, 0)), (&["LA3A"][..], (false, 2)), (&["LA3A", "LA3B"][..], (false, 3))] {
+        for other in all_but(own) {
+            let mut b = listener();
+            b.on_burst(1.0, &request(digis, other));
+            assert!(b.is_idle() && b.take_events().is_empty(), "via {digis:?}: answered {other:?}");
+        }
+        let mut b = listener();
+        b.on_burst(1.0, &request(digis, own));
+        assert!(b.is_connected(), "via {digis:?}");
+    }
+}
+
+#[test]
+fn connect_ack_must_name_our_request() {
+    let mut net = Net::new(41, 0.0, 0.0);
+    let link = &mut net.nodes[A].node.link;
+    link.connect(0.0, "LA1AAA", "LA2BBB-1", &via(&["LA3DDD"])).unwrap();
+    let State::Connecting { session, .. } = &link.state else { panic!("not connecting") };
+    let id = *session;
+    // The header is the called station's, through one digipeater. The payload is not ours.
+    let ack = |calls, digis: &[&str]| connect_burst(Kind::ConnectAck, id, calls, digis, true, 2);
+    let ours = ("LA1AAA", "LA2BBB-1");
+    for (calls, digis) in [
+        (ours, &["LA3EEE"][..]),
+        (ours, &["LA3DDD", "LA3DDD"]),
+        (ours, &[]),
+        (("LA9ZZZ", "LA2BBB-1"), &["LA3DDD"]),
+        (("LA1AAA", "LA9ZZZ"), &["LA3DDD"]),
+    ] {
+        link.on_burst(0.5, &ack(calls, digis));
+        assert!(!link.is_connected(), "connected by {calls:?} via {digis:?}");
+    }
+    link.on_burst(0.5, &ack(ours, &["LA3DDD"]));
+    assert!(link.is_connected());
+}
+
+#[test]
+fn closed_session_answers_only_its_peers_disc() {
+    // The caller did not hear our DiscAck and sends its Disc again. We answer with the
+    // session's own flags, and only a Disc that came the session's way.
+    for (digis, peer, own_flags) in [(&[][..], (false, 0), 0), (&["LA3DDD"][..], (false, 2), FLAG_ROUTED | FLAG_UP)] {
+        let mut net = Net::chain(42, 0.0, digis, LinkConfig::default());
+        let b = net.b();
+        net.nodes[A].node.link.connect(0.0, "LA1AAA", "LA2BBB-1", &via(digis)).unwrap();
+        net.run_until(120.0, |n| n.both_connected());
+        let State::Connected(s) = &net.nodes[b].node.link.state else { panic!("not connected") };
+        let id = s.id;
+        net.nodes[A].node.link.disconnect(net.now);
+        net.run_until(120.0, |n| n.both_idle());
+        let now = net.now + 1.0;
+        let link = &mut net.nodes[b].node.link;
+        let disc = |(up, route): (bool, u8)| RxBurst {
+            header: Header { kind: Kind::Disc, ..probe(id, up, route).header },
+            ..probe(id, up, route)
+        };
+        for other in all_but(peer) {
+            link.on_burst(now, &disc(other));
+            assert!(link.poll(now, false).is_none(), "via {digis:?}: answered {other:?}");
+        }
+        link.on_burst(now, &disc(peer));
+        let ack = link.poll(now, false).expect("answers its peer's Disc");
+        assert_eq!(
+            (ack.header.kind, ack.header.session, ack.header.flags),
+            (Kind::DiscAck, id, own_flags),
+            "via {digis:?}"
+        );
+    }
+}
+
+#[test]
+fn abort_reaches_the_peer_through_a_digipeater() {
+    let digis = ["LA3DDD"];
+    let mut net = Net::chain(43, 0.0, &digis, LinkConfig::default());
+    net.nodes[A].node.link.connect(0.0, "LA1AAA", "LA2BBB-1", &via(&digis)).unwrap();
+    net.run_until(120.0, |n| n.both_connected());
+    let quiet = net.now + 20.0;
+    net.run_until(30.0, |n| n.now >= quiet);
+    net.nodes[A].node.link.abort(net.now);
+    assert!(net.nodes[A].node.link.is_idle());
+    // One Disc, repeated once: well before B would miss A by itself.
+    let t = net.run_until(30.0, |n| n.nodes[n.b()].node.link.is_idle());
+    assert!(t < 5.0, "took {t} s");
+}
+
+#[test]
+fn connect_payload_parsing() {
+    let (a, b) = ("LA1AAA".to_string(), "LA2BBB-1".to_string());
+    for digis in [&[][..], &["LA3A"], &["LA3A", "LA3B-2"]] {
+        let p = calls_payload(&a, &b, &via(digis));
+        assert_eq!(parse_calls_payload(&p), Some((a.clone(), b.clone(), via(digis))), "via {digis:?}");
+    }
+    // More digipeaters than a path can have.
+    assert_eq!(parse_calls_payload(&calls_payload(&a, &b, &via(&["LA3A", "LA3B", "LA3C"]))), None);
+
+    let good = calls_payload(&a, &b, &via(&["LA3A"]));
+    let count_at = 4 + 1 + a.len() + 1 + b.len();
+    assert_eq!(good[count_at], 1);
+    let with = |at: usize, byte: u8| {
+        let mut p = good.clone();
+        p[at] = byte;
+        p
+    };
+    // A routed payload names at least one digipeater, and at most MAX_DIGIS. The
+    // padding after the first call would read as empty calls.
+    assert_eq!(parse_calls_payload(&with(count_at, 0)), None);
+    assert_eq!(parse_calls_payload(&with(count_at, MAX_DIGIS as u8 + 1)), None);
+    assert!(parse_calls_payload(&with(count_at, MAX_DIGIS as u8)).is_some());
+    // Not our payload, not text, or cut short.
+    assert_eq!(parse_calls_payload(&with(3, b'3')), None);
+    assert_eq!(parse_calls_payload(&with(5, 0xff)), None);
+    assert_eq!(parse_calls_payload(&good[..count_at]), None);
+    assert_eq!(parse_calls_payload(&good[..count_at + 3]), None);
+    assert_eq!(parse_calls_payload(&[]), None);
+}

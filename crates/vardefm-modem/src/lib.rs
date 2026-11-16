@@ -155,7 +155,7 @@ impl Modem {
     }
 
     fn leader_symbols(&self) -> usize {
-        (self.txdelay / self.ofdm.p.symbol_duration()).ceil() as usize
+        self.ofdm.leader_symbols(self.txdelay)
     }
 
     /// Length in samples of a burst.

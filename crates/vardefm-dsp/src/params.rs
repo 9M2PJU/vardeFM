@@ -77,12 +77,13 @@ impl OfdmParams {
         }
     }
 
+    /// Every mode. Tests that calibrate or check something per mode loop over this.
+    pub fn all() -> [Self; 2] {
+        [Self::narrow(), Self::wide()]
+    }
+
     pub fn by_name(name: &str) -> Option<Self> {
-        match name {
-            "narrow" => Some(Self::narrow()),
-            "wide" => Some(Self::wide()),
-            _ => None,
-        }
+        Self::all().into_iter().find(|p| p.name == name)
     }
 
     pub fn symbol_len(&self) -> usize {

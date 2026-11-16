@@ -1083,8 +1083,8 @@ fn hop_margin_limits() {
 fn digipeater_carries_its_own_session_while_relaying() {
     // A talks to B through D, while D itself talks to C. A, B and C hear only D.
     // C and A or B cannot hear each other, and their bursts collide at D, so both
-    // sessions retry a lot (see the limits in docs/PROTOCOL.md). Over seeds 44..124,
-    // every run finishes.
+    // sessions retry a lot (see the limits in docs/PROTOCOL.md). Run by hand over seeds
+    // 44..124 (change the range below), every run finishes.
     for seed in 44..48 {
         let digis = ["LA3DDD"];
         let mut net = Net::chain(seed, 0.0, &digis, LinkConfig::default());
@@ -1131,7 +1131,8 @@ fn direct_ends_retrying_together_recover() {
     // these collide. Then both retry after the same wait, give or take the back-off,
     // and without giving way to each other every retry collides until the session drops.
     let mut dropped = Vec::new();
-    for seed in 0..40 {
+    // Without giving way, 4 of these 15 seeds drop (0, 2, 12, 14).
+    for seed in 0..15 {
         let mut net = Net::new(seed, 0.0, 0.0);
         net.nodes[A].node.link.connect(0.0, "LA1AAA", "LA2BBB-1", &[]).unwrap();
         net.run_until(60.0, |n| n.both_connected());

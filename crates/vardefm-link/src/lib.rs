@@ -771,9 +771,9 @@ impl Link {
                             let kind = if s.closing.is_some() && s.disc_tries > 0 { Kind::Disc } else { Kind::Data };
                             // Through digipeaters, both ends may retry while a repeat is
                             // on the air; a wider spread keeps them from colliding again.
-                            // A busy channel is then most likely the peer's burst (its
-                            // retry, or coming through a digipeater), so the retry gives
-                            // way to it and answers it instead. Without that, two ends
+                            // On any route, a busy channel is most likely the peer's burst
+                            // (its retry, or coming through a digipeater), so the retry
+                            // gives way to it and answers it instead. Without that, two ends
                             // that retry together collide on every retry: their waits
                             // differ by less than a burst.
                             let hops = s.route.hops();

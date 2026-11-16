@@ -344,7 +344,12 @@ not on-air compatible with VARA FM digipeaters.
   supports best. Each digipeater adds a full copy of every burst to the channel, so with
   *n* digipeaters on one frequency the throughput falls to about 1/(*n* + 1). Session ids
   are 8 bits: two routed sessions through one digipeater with the same id would confuse
-  it (a direct session with the same id cannot).
+  it (a direct session with the same id cannot). A digipeater's own session shares the
+  channel with the sessions it repeats, and its peer usually cannot hear the stations on
+  the other side, nor they the peer, so their bursts collide at the digipeater. Right
+  after a repeat the digipeater may also start a burst of its own over the answer, which
+  it cannot hear yet. Both sessions then retry a lot. With 2 kB each way on both at once,
+  a simulated digipeater lost its own session in 7 runs of 80.
 
 ## 4. Host interface
 

@@ -582,15 +582,44 @@ fn retry_wait_grows_with_hops_and_margin() {
     }
 }
 
+/// A sends 2 kB to B through one digipeater that repeats `delay` s after each burst.
+/// Returns the bursts sent again for want of an answer (connect requests and data),
+/// or None if the data did not arrive.
+fn slow_digipeater_resends(delay: f64, hop_margin_s: f64, seed: u32) -> Option<u64> {
+    let digis = ["LA3DDD"];
+    let mut net = Net::chain(seed, 0.0, &digis, LinkConfig { hop_margin_s, ..LinkConfig::default() });
+    net.nodes[1].node.set_digipeater(Digipeater::new(&["LA3DDD".to_string()], delay));
+    let b = net.b();
+    net.nodes[A].node.link.connect(0.0, "LA1AAA", "LA2BBB-1", &via(&digis)).unwrap();
+    let da = data(2000, seed);
+    let mut queued = false;
+    while net.now < 900.0 && net.nodes[b].host_rx != da {
+        net.step();
+        if net.has(A, &LinkEvent::Disconnected) || net.has(b, &LinkEvent::Disconnected) {
+            return None;
+        }
+        if !queued && net.both_connected() {
+            queued = true;
+            net.nodes[A].node.link.send_data(&da);
+        }
+    }
+    let requests = net.sent.iter().filter(|s| s.3 == Kind::ConnectReq).count() as u64;
+    let retries = net.nodes[A].node.link.stats.retries + net.nodes[b].node.link.stats.retries;
+    (net.nodes[b].host_rx == da).then_some(requests - 1 + retries)
+}
+
 #[test]
 fn slow_digipeater_needs_a_larger_hop_margin() {
-    // The digipeater answers 1 s after each burst instead of 0.2 s. B cannot hear A,
-    // so only the hop margin covers the delay: with it raised, the session runs.
-    let digis = ["LA3DDD"];
-    let cfg = LinkConfig { hop_margin_s: 2.0, ..LinkConfig::default() };
-    let mut net = Net::chain(35, 0.0, &digis, cfg);
-    net.nodes[1].node.set_digipeater(Digipeater::new(&["LA3DDD".to_string()], 1.0));
-    routed_session(net, &digis, 35);
+    // The digipeater repeats 2 s after each burst instead of 0.2 s. B cannot hear A,
+    // so only the hop margin covers the delay. An answer passes the digipeater twice,
+    // as our burst and then as the answer, so the margin has to cover the delay twice.
+    // With less, a station resends while the answer is still on its way.
+    for seed in 35..39 {
+        let (default, once, twice) = (0.5, 2.0, 4.0);
+        assert_ne!(slow_digipeater_resends(2.0, default, seed), Some(0), "seed {seed}, default margin");
+        assert_ne!(slow_digipeater_resends(2.0, once, seed), Some(0), "seed {seed}, the delay once");
+        assert_eq!(slow_digipeater_resends(2.0, twice, seed), Some(0), "seed {seed}, the delay twice");
+    }
 }
 
 #[test]
@@ -1037,4 +1066,15 @@ fn retries_are_spaced_as_the_protocol_document_says() {
     // Through digipeaters the random spread really is wider than a direct session's.
     assert!(widest_spread[0] < backoff + slack);
     assert!(widest_spread[1] > backoff + slack && widest_spread[2] > backoff + slack, "{widest_spread:?}");
+}
+
+#[test]
+fn hop_margin_limits() {
+    for ok in [0.0, 0.5, MAX_HOP_MARGIN_S] {
+        assert!(valid_hop_margin(ok), "{ok}");
+    }
+    for bad in [-0.1, MAX_HOP_MARGIN_S + 0.1, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        assert!(!valid_hop_margin(bad), "{bad}");
+    }
+    assert!(valid_hop_margin(LinkConfig::default().hop_margin_s));
 }

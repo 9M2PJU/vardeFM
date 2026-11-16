@@ -18,22 +18,22 @@ use super::{norm_call, parse_calls_payload, void_codeword};
 use std::collections::HashMap;
 use vardefm_modem::{Burst, Kind, RxBurst};
 
-/// A session is forgotten after this long without a burst. Well above the end
-/// stations' keepalive on a routed session, even with a large hop margin.
+// The three lifetimes below must outlast the end stations' timers at the largest hop
+// margin (`MAX_HOP_MARGIN_S`); `lifetimes_outlast_the_end_stations_timers` checks them
+// against the link's own waits.
+
+/// A session is forgotten after this long without a burst: longer than a quiet
+/// session goes before the called station probes it.
 const IDLE_EXPIRY_S: f64 = 600.0;
 /// After the closing DiscAck, kept this long after the last Disc or DiscAck we repeat,
 /// so a resent Disc and its answer still get through.
-const CLOSE_EXPIRY_S: f64 = 30.0;
+const CLOSE_EXPIRY_S: f64 = 60.0;
 /// Life of a session not yet answered (no ConnectAck or burst from the called station
 /// repeated). A stale entry would repeat the bursts of a later routed session that
 /// reuses its id if we missed that session's connect bursts, so it must not wait
-/// for `IDLE_EXPIRY_S`. Every ConnectReq naming us renews it, so it only has to
-/// outlast one of the caller's attempts: the caller resends after
-/// `1.2 s + n · (2 · connect burst + 2 · 0.2 s + hop margin)` plus up to 0.5 s of
-/// jitter. With 2 digipeaters, the 1.85 s narrow connect burst and a hop margin of
-/// 10 s (well above the 6 s of a slow VOX-keyed path) that is 29.4 s, about 32 s from
-/// one request to the next. 90 s still covers two attempts with room to spare, so one
-/// request we fail to decode does not drop a session still connecting.
+/// for `IDLE_EXPIRY_S`. Every ConnectReq naming us renews it, so it has to outlast
+/// two of the caller's attempts: one request we fail to decode must not drop a
+/// session still connecting.
 const UNCONFIRMED_EXPIRY_S: f64 = 90.0;
 
 #[derive(Clone, Debug)]
@@ -185,8 +185,9 @@ impl Digipeater {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::calls_payload;
-    use vardefm_modem::{AudioLevel, Header, Modem, FLAG_UP, MAX_DIGIS};
+    use crate::{calls_payload, Link, LinkConfig, CONNECT_JITTER_S, MAX_HOP_MARGIN_S, RETRY_BACKOFF_S};
+    use std::sync::Arc;
+    use vardefm_modem::{AudioLevel, Header, Modem, OfdmParams, FLAG_UP, MAX_DIGIS};
 
     /// A burst of a direct session: route field 0, no UP, as released versions send.
     fn direct(kind: Kind, session: u8, payload: Vec<Option<Vec<u8>>>) -> RxBurst {
@@ -470,6 +471,34 @@ mod tests {
         assert!(repeat(&mut d, 115.0, &connect_ack(7, &["LA3D1"], 0)).is_some());
         let t = 115.0 + CLOSE_EXPIRY_S + 60.0;
         assert!(repeat(&mut d, t, &rx(Kind::Data, 7, false, 0, vec![])).is_some(), "the new session is live");
+    }
+
+    #[test]
+    fn lifetimes_outlast_the_end_stations_timers() {
+        for params in [OfdmParams::narrow(), OfdmParams::wide()] {
+            let modem = Arc::new(Modem::new(params, 0.1));
+            let cfg = LinkConfig { hop_margin_s: MAX_HOP_MARGIN_S, ..LinkConfig::default() };
+            let link = Link::new(modem.clone(), cfg.clone(), 1);
+            let (connect_s, disc_s) = (modem.burst_seconds(0, 1) as f64, modem.burst_seconds(0, 0) as f64);
+            for n in 1..=MAX_DIGIS as u8 {
+                let what = format!("{}, {n} digipeaters", modem.ofdm.p.name);
+                // Connecting: two of the caller's requests in a row, start to start. We
+                // hear each after the same delay, so that is also what we see.
+                let attempt =
+                    connect_s + cfg.response_timeout_s + link.relay_s(n, connect_s, connect_s) + CONNECT_JITTER_S;
+                assert!(UNCONFIRMED_EXPIRY_S > 2.0 * attempt, "{what}: {attempt:.1} s per attempt");
+                // Quiet: the called station probes last, 1.5 keepalives after it last
+                // heard the caller, whose burst passed us up to a path's length earlier.
+                let path = n as f64 * (link.max_burst_s + cfg.turnaround_s + cfg.hop_margin_s);
+                let quiet = 1.5 * link.keepalive_s(n) + RETRY_BACKOFF_S + path;
+                assert!(IDLE_EXPIRY_S > quiet, "{what}: quiet for {quiet:.1} s");
+                // Closing: the DiscAck is lost after us, and the Disc comes again. At the
+                // earliest we repeated the DiscAck right after the first Disc.
+                let resent = disc_s + link.response_wait(n, disc_s) + RETRY_BACKOFF_S * Link::retry_spread(n);
+                assert!(CLOSE_EXPIRY_S > resent, "{what}: Disc again after {resent:.1} s");
+                println!("{what}: attempt {attempt:.1} s, quiet {quiet:.1} s, Disc again {resent:.1} s");
+            }
+        }
     }
 
     #[test]

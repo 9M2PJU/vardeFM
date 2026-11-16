@@ -1078,3 +1078,45 @@ fn hop_margin_limits() {
     }
     assert!(valid_hop_margin(LinkConfig::default().hop_margin_s));
 }
+
+#[test]
+fn digipeater_carries_its_own_session_while_relaying() {
+    // A talks to B through D, while D itself talks to C. A, B and C hear only D.
+    for seed in 44..48 {
+        let digis = ["LA3DDD"];
+        let mut net = Net::chain(seed, 0.0, &digis, LinkConfig::default());
+        let (d, b, c) = (1, 2, 3);
+        let mut peer = Peer {
+            name: "C".into(),
+            node: Node::new(Link::new(net.modem.clone(), LinkConfig::default(), seed + 9)),
+            tx: None,
+            host_rx: Vec::new(),
+            events: Vec::new(),
+            dead: false,
+        };
+        peer.node.link.set_mycalls(vec!["LA5CCC".into()]);
+        peer.node.link.set_listen(true);
+        net.nodes.push(peer);
+        for row in net.hears.iter_mut() {
+            row.push(false);
+        }
+        net.hears.push(vec![false, true, false, false]);
+        net.hears[d][c] = true;
+
+        net.nodes[A].node.link.connect(0.0, "LA1AAA", "LA2BBB-1", &via(&digis)).unwrap();
+        net.nodes[d].node.link.connect(0.0, "LA3DDD", "LA5CCC", &[]).unwrap();
+        net.run_until(300.0, |n| n.nodes.iter().all(|p| p.node.link.is_connected()));
+        // 2 kB each way on both sessions, all queued at once.
+        let sent: Vec<Vec<u8>> = (0..4).map(|i| data(2000, seed + i)).collect();
+        for (i, bytes) in sent.iter().enumerate() {
+            net.nodes[i].node.link.send_data(bytes);
+        }
+        let from = [b, c, A, d];
+        net.run_until(1500.0, |n| (0..4).all(|i| n.nodes[i].host_rx.len() >= sent[from[i]].len()));
+        for i in 0..4 {
+            assert_eq!(net.nodes[i].host_rx, sent[from[i]], "seed {seed}: what {} received", net.nodes[i].name);
+            assert!(!net.has(i, &LinkEvent::Disconnected), "seed {seed}: {} dropped", net.nodes[i].name);
+        }
+        assert!(net.nodes[d].node.repeats() >= 4, "seed {seed}: {} repeats", net.nodes[d].node.repeats());
+    }
+}

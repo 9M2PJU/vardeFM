@@ -291,7 +291,9 @@ not on-air compatible with VARA FM digipeaters.
   the caller) repeats a burst with UP = 0 and hop *i* − 1, or with UP = 1 and hop
   *n* − *i*.
   It sends the burst again 0.2 s after it ends, at the same level, with the route field
-  plus one and every other field unchanged, whether or not the channel is busy. A path
+  plus one and every other field unchanged, whether or not the channel is busy. A
+  digipeater with a session of its own sends repeats first, and starts no burst of its
+  own while a repeat is waiting for its 0.2 s. A path
   may name one station more than once (the same call twice, or two calls of one
   station). It never hears its own repeat, so when it holds the next positions in a row
   it passes them all in one repeat, adding one to the route field for each.

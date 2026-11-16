@@ -44,6 +44,11 @@ run the same minor version.
 - A NaN, an Inf or a sample far beyond full scale from the sound card no longer loses a
   burst it falls in or shortly before, and cannot leave busy detection deaf; the last
   good sample takes its place. (#10)
+- A transfer could stop for good, with the session still connected, after lost bursts
+  and a change of speed level. When data that had arrived ahead of a gap was sent again
+  at a faster level, the receiver acknowledged the longer copy but kept the shorter one,
+  so the sender never sent the difference again. Only the receiving side changes: a
+  station with this fix receives correctly from any version. (#29, thanks @mustig)
 
 ## [0.3.1] - 2026-11-09
 

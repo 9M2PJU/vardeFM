@@ -70,7 +70,7 @@ pub struct Digipeater {
     table: HashMap<u8, Entry>,
     /// Repeats waiting for their time, in order.
     queue: Vec<(f64, Burst)>,
-    pub repeated: u64,
+    repeated: u64,
 }
 
 impl Digipeater {
@@ -85,13 +85,15 @@ impl Digipeater {
         }
     }
 
-    pub fn calls(&self) -> &[String] {
-        &self.calls
+    /// Bursts repeated so far.
+    pub fn repeated(&self) -> u64 {
+        self.repeated
     }
 
-    /// Sessions currently relayed.
-    pub fn sessions(&self) -> usize {
-        self.table.len()
+    /// Sessions relayed at `now`.
+    #[cfg(test)]
+    fn sessions(&self, now: f64) -> usize {
+        self.table.values().filter(|e| e.expires > now).count()
     }
 
     /// Handle a decoded burst; queue its repeat if it is ours to repeat.
@@ -251,7 +253,7 @@ mod tests {
         assert!(repeat(&mut d, 0.0, &rx(Kind::Data, 7, false, 0, vec![])).is_none());
         // A direct (VFM1) request names no digipeater.
         assert!(repeat(&mut d, 0.0, &direct_connect(Kind::ConnectReq, 8)).is_none());
-        assert_eq!(d.sessions(), 0);
+        assert_eq!(d.sessions(0.0), 0);
     }
 
     #[test]
@@ -269,7 +271,7 @@ mod tests {
         // A ConnectReq whose codeword failed cannot be repeated, and tells us nothing
         // about the session: the entry stays.
         assert!(repeat(&mut d, 2.0, &rx(Kind::ConnectReq, 7, false, 0, vec![None])).is_none());
-        assert_eq!(d.sessions(), 1);
+        assert_eq!(d.sessions(2.0), 1);
     }
 
     #[test]
@@ -339,7 +341,7 @@ mod tests {
         // says it is direct, so it cannot be mistaken for ours and tells us nothing.
         let mut d = stale_entry();
         assert!(repeat(&mut d, 3.0, &direct_connect(Kind::ConnectReq, 7)).is_none());
-        assert_eq!(d.sessions(), 1);
+        assert_eq!(d.sessions(3.0), 1);
         direct_data_not_repeated(&mut d, 3.0);
         // Our caller's resent request is still repeated.
         assert_eq!(repeat(&mut d, 10.0, &connect_req(7, &["LA3D1"], 0)).unwrap().hop(), 1);
@@ -350,7 +352,7 @@ mod tests {
         // Only the called station's ConnectAck of the direct session is heard.
         let mut d = stale_entry();
         assert!(repeat(&mut d, 3.0, &direct_connect(Kind::ConnectAck, 7)).is_none());
-        assert_eq!(d.sessions(), 1);
+        assert_eq!(d.sessions(3.0), 1);
         direct_data_not_repeated(&mut d, 3.0);
     }
 
@@ -362,7 +364,7 @@ mod tests {
         assert!(repeat(&mut d, 10.0, &direct_connect(Kind::ConnectReq, 7)).is_none());
         assert!(repeat(&mut d, 12.0, &direct_connect(Kind::ConnectAck, 7)).is_none());
         direct_data_not_repeated(&mut d, 12.0);
-        assert_eq!(d.sessions(), 1);
+        assert_eq!(d.sessions(15.0), 1);
         // Ours keeps being repeated both ways.
         let down = repeat(&mut d, 20.0, &rx(Kind::Data, 7, false, 0, vec![])).expect("repeats the caller");
         assert_eq!((down.hop(), down.up(), down.routed()), (1, false, true));
@@ -375,12 +377,12 @@ mod tests {
         let mut d = stale_entry();
         // A new routed session through other digipeaters, heard as the request and its repeat.
         assert!(repeat(&mut d, 3.0, &connect_req(7, &["LA3D8", "LA3D9"], 0)).is_none());
-        assert_eq!(d.sessions(), 0);
+        assert_eq!(d.sessions(3.0), 0);
         assert!(repeat(&mut d, 4.0, &connect_req(7, &["LA3D8", "LA3D9"], 1)).is_none());
         // Its acknowledgement as well: a fresh stale entry, then only the ConnectAck heard.
         let mut d = stale_entry();
         assert!(repeat(&mut d, 3.0, &connect_ack(7, &["LA3D8", "LA3D9"], 0)).is_none());
-        assert_eq!(d.sessions(), 0);
+        assert_eq!(d.sessions(3.0), 0);
         assert!(repeat(&mut d, 5.0, &rx(Kind::Data, 7, false, 0, vec![])).is_none());
     }
 
@@ -402,12 +404,12 @@ mod tests {
             assert!(repeat(&mut d, t, &connect_req(7, &["LA3D1"], 0)).is_some(), "resent request at {t}");
         }
         assert!(repeat(&mut d, 160.0, &rx(Kind::ConnectReq, 7, false, 0, vec![None])).is_none());
-        assert_eq!(d.sessions(), 1, "one undecoded request");
+        assert_eq!(d.sessions(160.0), 1, "one undecoded request");
         assert!(repeat(&mut d, 192.0, &connect_req(7, &["LA3D1"], 0)).is_some());
         // Once the caller gives up, the entry does not wait for IDLE_EXPIRY_S.
         let t = 192.0 + UNCONFIRMED_EXPIRY_S + 1.0;
         assert!(repeat(&mut d, t, &rx(Kind::Data, 7, false, 0, vec![])).is_none());
-        assert_eq!(d.sessions(), 0);
+        assert_eq!(d.sessions(t), 0);
     }
 
     #[test]
@@ -419,10 +421,12 @@ mod tests {
         for (t, kind) in [(10.0, Kind::Data), (40.0, Kind::Data), (70.0, Kind::Disc), (80.0, Kind::DiscAck)] {
             assert!(repeat(&mut d, t, &rx(kind, 7, false, 0, vec![])).is_none(), "{kind:?} at {t} repeated");
         }
-        assert_eq!(d.sessions(), 1);
-        // They do not keep the entry alive either.
+        assert_eq!(d.sessions(80.0), 1);
+        // They do not keep the entry alive either. It stops counting when it expires,
+        // not only when the next burst clears it out.
+        assert_eq!(d.sessions(UNCONFIRMED_EXPIRY_S + 1.0), 0);
         d.on_burst(UNCONFIRMED_EXPIRY_S + 1.0, &rx(Kind::Data, 7, false, 0, vec![]));
-        assert_eq!(d.sessions(), 0);
+        assert_eq!(d.sessions(UNCONFIRMED_EXPIRY_S + 1.0), 0);
     }
 
     #[test]
@@ -449,10 +453,10 @@ mod tests {
         // Meanwhile only the close is repeated, from either end.
         assert!(repeat(&mut d, 120.0, &rx(Kind::Data, 7, false, 0, vec![])).is_none(), "Data after the close");
         assert!(repeat(&mut d, 121.0, &rx(Kind::Data, 7, true, 0, vec![])).is_none(), "Data after the close");
-        assert_eq!(d.sessions(), 1);
+        assert_eq!(d.sessions(121.0), 1);
         let gone = 115.0 + CLOSE_EXPIRY_S + 1.0;
         assert!(repeat(&mut d, gone, &rx(Kind::Disc, 7, false, 0, vec![])).is_none(), "kept past the close window");
-        assert_eq!(d.sessions(), 0);
+        assert_eq!(d.sessions(gone), 0);
     }
 
     #[test]

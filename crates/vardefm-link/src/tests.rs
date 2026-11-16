@@ -8,10 +8,10 @@ use vardefm_modem::OfdmParams;
 
 const DT: f64 = 0.01;
 
-struct Node {
+/// A station on the fake channel. `node` is the shipped link and digipeater.
+struct Peer {
     name: String,
-    link: Link,
-    digi: Option<Digipeater>,
+    node: Node,
     /// (start, end, burst, from the digipeater) while transmitting.
     tx: Option<(f64, f64, Burst, bool)>,
     host_rx: Vec<u8>,
@@ -21,7 +21,7 @@ struct Node {
 }
 
 struct Net {
-    nodes: Vec<Node>,
+    nodes: Vec<Peer>,
     /// `hears[to][from]`.
     hears: Vec<Vec<bool>>,
     modem: Arc<Modem>,
@@ -53,11 +53,10 @@ impl Net {
     fn build(seed: u32, burst_loss: f64, cw_loss: f64, digis: &[&str], cfg: LinkConfig) -> Self {
         let modem = Arc::new(Modem::new(OfdmParams::narrow(), 0.1));
         let count = digis.len() + 2;
-        let mut nodes: Vec<Node> = (0..count)
-            .map(|i| Node {
+        let mut nodes: Vec<Peer> = (0..count)
+            .map(|i| Peer {
                 name: String::new(),
-                link: Link::new(modem.clone(), cfg.clone(), seed + i as u32),
-                digi: None,
+                node: Node::new(Link::new(modem.clone(), cfg.clone(), seed + i as u32)),
                 tx: None,
                 host_rx: Vec::new(),
                 events: Vec::new(),
@@ -65,15 +64,15 @@ impl Net {
             })
             .collect();
         nodes[A].name = "A".into();
-        nodes[A].link.set_mycalls(vec!["LA1AAA".into()]);
+        nodes[A].node.link.set_mycalls(vec!["LA1AAA".into()]);
         for (i, d) in digis.iter().enumerate() {
             nodes[i + 1].name = format!("D{}", i + 1);
-            nodes[i + 1].digi = Some(Digipeater::new(&[d.to_string()], cfg.turnaround_s));
+            nodes[i + 1].node.set_digi(&[d.to_string()]);
         }
         let b = count - 1;
         nodes[b].name = "B".into();
-        nodes[b].link.set_mycalls(vec!["LA2BBB-1".into()]);
-        nodes[b].link.set_listen(true);
+        nodes[b].node.link.set_mycalls(vec!["LA2BBB-1".into()]);
+        nodes[b].node.link.set_listen(true);
         let hears = (0..count).map(|to| (0..count).map(|from| to.abs_diff(from) == 1).collect()).collect();
         Self {
             nodes,
@@ -118,10 +117,8 @@ impl Net {
         // Finish transmissions.
         for i in 0..self.nodes.len() {
             if self.nodes[i].tx.as_ref().is_some_and(|t| now >= t.1) {
-                let (start, end, _, digi) = self.nodes[i].tx.take().unwrap();
-                if !digi {
-                    self.nodes[i].link.tx_done(now);
-                }
+                let (start, end, ..) = self.nodes[i].tx.take().unwrap();
+                self.nodes[i].node.tx_done(now);
                 self.airtime += end - start;
             }
         }
@@ -148,27 +145,16 @@ impl Net {
                 .map(|cw| if self.chance(self.cw_loss) { None } else { Some(cw.clone()) })
                 .collect();
             let rx = RxBurst { header: burst.header, payload, snr_db: 30.0, end_sample: 0, level: Default::default() };
-            let node = &mut self.nodes[to];
-            node.link.on_burst(now, &rx);
-            if let Some(d) = &mut node.digi {
-                d.on_burst(now, &rx);
-            }
+            self.nodes[to].node.on_burst(now, &rx);
         }
         self.history.retain(|&(_, _, e)| e + 30.0 > now);
-        // Poll for new transmissions: digipeater repeats first.
+        // Poll for new transmissions.
         for i in 0..self.nodes.len() {
             if self.nodes[i].dead || self.nodes[i].tx.is_some() {
                 continue;
             }
             let busy = self.busy(i);
-            let node = &mut self.nodes[i];
-            let (b, digi) = match node.digi.as_mut().and_then(|d| d.poll(now)) {
-                Some(b) => (b, true),
-                None => match node.link.poll(now, busy) {
-                    Some(b) => (b, false),
-                    None => continue,
-                },
-            };
+            let Some((b, digi)) = self.nodes[i].node.poll(now, busy) else { continue };
             let dur = self.modem.burst_seconds(b.header.level, b.header.ncw as usize) as f64;
             if self.trace() {
                 eprintln!(
@@ -196,7 +182,7 @@ impl Net {
             self.nodes[i].tx = Some((now, end, b, digi));
         }
         for n in &mut self.nodes {
-            for e in n.link.take_events() {
+            for e in n.node.link.take_events() {
                 if let LinkEvent::Data(d) = &e {
                     n.host_rx.extend_from_slice(d);
                 }
@@ -220,11 +206,11 @@ impl Net {
     }
 
     fn both_connected(&self) -> bool {
-        self.nodes[A].link.is_connected() && self.nodes[self.b()].link.is_connected()
+        self.nodes[A].node.link.is_connected() && self.nodes[self.b()].node.link.is_connected()
     }
 
     fn both_idle(&self) -> bool {
-        self.nodes[A].link.is_idle() && self.nodes[self.b()].link.is_idle()
+        self.nodes[A].node.link.is_idle() && self.nodes[self.b()].node.link.is_idle()
     }
 }
 
@@ -236,35 +222,35 @@ fn data(n: usize, seed: u32) -> Vec<u8> {
 
 fn session(burst_loss: f64, cw_loss: f64, seed: u32) {
     let mut net = Net::new(seed, burst_loss, cw_loss);
-    net.nodes[0].link.connect(0.0, "LA1AAA", "LA2BBB-1", &[]).unwrap();
-    net.run_until(60.0, |n| n.nodes[0].link.is_connected() && n.nodes[1].link.is_connected());
+    net.nodes[0].node.link.connect(0.0, "LA1AAA", "LA2BBB-1", &[]).unwrap();
+    net.run_until(60.0, |n| n.nodes[0].node.link.is_connected() && n.nodes[1].node.link.is_connected());
     assert!(net.has(0, &LinkEvent::Connected { source: "LA1AAA".into(), destination: "LA2BBB-1".into() }));
     assert!(net.has(1, &LinkEvent::Connected { source: "LA1AAA".into(), destination: "LA2BBB-1".into() }));
     assert!(net.has(1, &LinkEvent::Pending));
 
     let (a, b) = (data(10_000, seed), data(10_000, seed + 7));
-    net.nodes[1].link.send_data(&b[..300]); // banner first
+    net.nodes[1].node.link.send_data(&b[..300]); // banner first
     let t = net.run_until(600.0, |n| n.nodes[0].host_rx.len() >= 300);
     assert!(t < 60.0);
-    net.nodes[1].link.send_data(&b[300..]);
-    net.nodes[0].link.send_data(&a);
+    net.nodes[1].node.link.send_data(&b[300..]);
+    net.nodes[0].node.link.send_data(&a);
     let t = net.run_until(900.0, |n| n.nodes[0].host_rx.len() >= b.len() && n.nodes[1].host_rx.len() >= a.len());
     assert_eq!(net.nodes[0].host_rx, b);
     assert_eq!(net.nodes[1].host_rx, a);
     net.run_until(60.0, |n| n.has(0, &LinkEvent::Buffer(0)) && n.has(1, &LinkEvent::Buffer(0)));
 
-    net.nodes[0].link.disconnect(net.now);
-    net.run_until(60.0, |n| n.nodes[0].link.is_idle() && n.nodes[1].link.is_idle());
+    net.nodes[0].node.link.disconnect(net.now);
+    net.run_until(60.0, |n| n.nodes[0].node.link.is_idle() && n.nodes[1].node.link.is_idle());
     for node in &net.nodes[..2] {
         assert_eq!(node.events.iter().filter(|e| **e == LinkEvent::Disconnected).count(), 1);
     }
     println!(
         "loss {burst_loss}/{cw_loss}: 20 kB in {t:.0} s, airtime {:.0} s, retries {}/{}, resent {}/{} bytes",
         net.airtime,
-        net.nodes[0].link.stats.retries,
-        net.nodes[1].link.stats.retries,
-        net.nodes[0].link.stats.bytes_resent,
-        net.nodes[1].link.stats.bytes_resent
+        net.nodes[0].node.link.stats.retries,
+        net.nodes[1].node.link.stats.retries,
+        net.nodes[0].node.link.stats.bytes_resent,
+        net.nodes[1].node.link.stats.bytes_resent
     );
 }
 
@@ -283,8 +269,8 @@ fn lossy_session() {
 fn connect_to_absent_station_gives_up() {
     let mut net = Net::new(4, 0.0, 0.0);
     net.nodes[1].dead = true;
-    net.nodes[0].link.connect(0.0, "LA1AAA", "LA2BBB-1", &[]).unwrap();
-    let t = net.run_until(60.0, |n| n.nodes[0].link.is_idle());
+    net.nodes[0].node.link.connect(0.0, "LA1AAA", "LA2BBB-1", &[]).unwrap();
+    let t = net.run_until(60.0, |n| n.nodes[0].node.link.is_idle());
     assert!(t < 25.0, "took {t} s");
     assert_eq!(net.nodes[0].events, vec![LinkEvent::Disconnected]);
 }
@@ -292,36 +278,36 @@ fn connect_to_absent_station_gives_up() {
 #[test]
 fn not_listening_or_wrong_call_is_ignored() {
     let mut net = Net::new(5, 0.0, 0.0);
-    net.nodes[1].link.set_listen(false);
-    net.nodes[0].link.connect(0.0, "LA1AAA", "LA2BBB-1", &[]).unwrap();
-    net.run_until(60.0, |n| n.nodes[0].link.is_idle());
+    net.nodes[1].node.link.set_listen(false);
+    net.nodes[0].node.link.connect(0.0, "LA1AAA", "LA2BBB-1", &[]).unwrap();
+    net.run_until(60.0, |n| n.nodes[0].node.link.is_idle());
     assert!(net.nodes[1].events.is_empty());
 
     let mut net = Net::new(6, 0.0, 0.0);
-    net.nodes[0].link.connect(0.0, "LA1AAA", "LA9ZZZ", &[]).unwrap();
-    net.run_until(60.0, |n| n.nodes[0].link.is_idle());
+    net.nodes[0].node.link.connect(0.0, "LA1AAA", "LA9ZZZ", &[]).unwrap();
+    net.run_until(60.0, |n| n.nodes[0].node.link.is_idle());
     assert!(net.nodes[1].events.is_empty());
 }
 
 #[test]
 fn abort_tells_the_peer() {
     let mut net = Net::new(7, 0.0, 0.0);
-    net.nodes[0].link.connect(0.0, "LA1AAA", "LA2BBB-1", &[]).unwrap();
-    net.run_until(60.0, |n| n.nodes[0].link.is_connected() && n.nodes[1].link.is_connected());
-    net.nodes[0].link.abort(net.now);
-    assert!(net.nodes[0].link.is_idle());
-    let t = net.run_until(10.0, |n| n.nodes[1].link.is_idle());
+    net.nodes[0].node.link.connect(0.0, "LA1AAA", "LA2BBB-1", &[]).unwrap();
+    net.run_until(60.0, |n| n.nodes[0].node.link.is_connected() && n.nodes[1].node.link.is_connected());
+    net.nodes[0].node.link.abort(net.now);
+    assert!(net.nodes[0].node.link.is_idle());
+    let t = net.run_until(10.0, |n| n.nodes[1].node.link.is_idle());
     assert!(t < 5.0);
 }
 
 #[test]
 fn dead_peer_is_detected() {
     let mut net = Net::new(8, 0.0, 0.0);
-    net.nodes[0].link.connect(0.0, "LA1AAA", "LA2BBB-1", &[]).unwrap();
-    net.run_until(60.0, |n| n.nodes[0].link.is_connected() && n.nodes[1].link.is_connected());
+    net.nodes[0].node.link.connect(0.0, "LA1AAA", "LA2BBB-1", &[]).unwrap();
+    net.run_until(60.0, |n| n.nodes[0].node.link.is_connected() && n.nodes[1].node.link.is_connected());
     net.nodes[1].dead = true;
-    net.nodes[0].link.send_data(b"hello?");
-    let t = net.run_until(120.0, |n| n.nodes[0].link.is_idle());
+    net.nodes[0].node.link.send_data(b"hello?");
+    let t = net.run_until(120.0, |n| n.nodes[0].node.link.is_idle());
     assert!(t < 60.0, "took {t} s");
     assert!(net.has(0, &LinkEvent::Disconnected));
 }
@@ -329,14 +315,14 @@ fn dead_peer_is_detected() {
 #[test]
 fn idle_link_is_kept_alive_then_dropped_when_peer_dies() {
     let mut net = Net::new(9, 0.0, 0.0);
-    net.nodes[0].link.connect(0.0, "LA1AAA", "LA2BBB-1", &[]).unwrap();
-    net.run_until(60.0, |n| n.nodes[0].link.is_connected() && n.nodes[1].link.is_connected());
+    net.nodes[0].node.link.connect(0.0, "LA1AAA", "LA2BBB-1", &[]).unwrap();
+    net.run_until(60.0, |n| n.nodes[0].node.link.is_connected() && n.nodes[1].node.link.is_connected());
     // Quiet for two minutes: keepalives keep both ends connected.
     net.run_until(130.0, |n| n.now > 120.0);
-    assert!(net.nodes[0].link.is_connected() && net.nodes[1].link.is_connected());
+    assert!(net.nodes[0].node.link.is_connected() && net.nodes[1].node.link.is_connected());
     // Then the caller disappears without a word; the called side notices.
     net.nodes[0].dead = true;
-    net.run_until(200.0, |n| n.nodes[1].link.is_idle());
+    net.run_until(200.0, |n| n.nodes[1].node.link.is_idle());
 }
 
 fn via(digis: &[&str]) -> Vec<String> {
@@ -346,28 +332,28 @@ fn via(digis: &[&str]) -> Vec<String> {
 /// Connect A to B through `net`'s digipeaters, move 10 kB each way, disconnect.
 fn routed_session(mut net: Net, digis: &[&str], seed: u32) -> f64 {
     let b = net.b();
-    net.nodes[A].link.connect(0.0, "LA1AAA", "LA2BBB-1", &via(digis)).unwrap();
+    net.nodes[A].node.link.connect(0.0, "LA1AAA", "LA2BBB-1", &via(digis)).unwrap();
     net.run_until(120.0, |n| n.both_connected());
     let connected = LinkEvent::Connected { source: "LA1AAA".into(), destination: "LA2BBB-1".into() };
     assert!(net.has(A, &connected) && net.has(b, &connected));
 
     let (da, db) = (data(10_000, seed), data(10_000, seed + 7));
-    net.nodes[b].link.send_data(&db);
-    net.nodes[A].link.send_data(&da);
+    net.nodes[b].node.link.send_data(&db);
+    net.nodes[A].node.link.send_data(&da);
     let t = net.run_until(3000.0, |n| n.nodes[A].host_rx.len() >= db.len() && n.nodes[b].host_rx.len() >= da.len());
     assert_eq!(net.nodes[A].host_rx, db);
     assert_eq!(net.nodes[b].host_rx, da);
 
     net.run_until(300.0, |n| n.has(A, &LinkEvent::Buffer(0)) && n.has(b, &LinkEvent::Buffer(0)));
-    net.nodes[A].link.disconnect(net.now);
+    net.nodes[A].node.link.disconnect(net.now);
     net.run_until(300.0, |n| n.both_idle());
     for i in [A, b] {
         assert_eq!(net.nodes[i].events.iter().filter(|e| **e == LinkEvent::Disconnected).count(), 1);
     }
-    let repeats: Vec<u64> = net.nodes.iter().filter_map(|n| n.digi.as_ref().map(|d| d.repeated)).collect();
+    let repeats: Vec<u64> = net.nodes[1..b].iter().map(|n| n.node.repeats()).collect();
     println!(
         "via {digis:?}: 20 kB in {t:.0} s, airtime {:.0} s, retries {}/{}, repeats {repeats:?}",
-        net.airtime, net.nodes[A].link.stats.retries, net.nodes[b].link.stats.retries
+        net.airtime, net.nodes[A].node.link.stats.retries, net.nodes[b].node.link.stats.retries
     );
     assert!(repeats.iter().all(|&r| r > 0), "every digipeater relayed");
     t
@@ -424,7 +410,7 @@ fn only_own_answered(net: &mut Net, own_a: (bool, u8), own_b: (bool, u8)) {
     net.run_until(30.0, |n| n.now >= settled);
     let now = net.now;
     for (i, own) in [(A, own_a), (net.b(), own_b)] {
-        let link = &mut net.nodes[i].link;
+        let link = &mut net.nodes[i].node.link;
         let State::Connected(s) = &link.state else { panic!("not connected") };
         let id = s.id;
         assert!(link.poll(now + 1.0, false).is_none(), "node {i} not quiet");
@@ -443,13 +429,13 @@ fn direct_session_ignores_bursts_a_digipeater_repeated() {
     // them. Anything else with its id is not the peer's: most of all a routed caller's
     // unrepeated burst (route 1, UP 0) heard directly, and copies a digipeater repeated.
     let mut net = Net::new(33, 0.0, 0.0);
-    net.nodes[A].link.connect(0.0, "LA1AAA", "LA2BBB-1", &[]).unwrap();
+    net.nodes[A].node.link.connect(0.0, "LA1AAA", "LA2BBB-1", &[]).unwrap();
     net.run_until(60.0, |n| n.both_connected());
     only_own_answered(&mut net, (false, 0), (false, 0));
 
     // A caller still connecting takes any Data with its session id as the answer.
     let mut net = Net::new(34, 0.0, 0.0);
-    let link = &mut net.nodes[A].link;
+    let link = &mut net.nodes[A].node.link;
     link.connect(0.0, "LA1AAA", "LA2BBB-1", &[]).unwrap();
     let State::Connecting { session, .. } = &link.state else { panic!("not connecting") };
     let id = *session;
@@ -468,13 +454,13 @@ fn routed_session_ignores_direct_bursts() {
     // (route 0) is another session's.
     let digis = ["LA3DDD"];
     let mut net = Net::chain(38, 0.0, &digis, LinkConfig::default());
-    net.nodes[A].link.connect(0.0, "LA1AAA", "LA2BBB-1", &via(&digis)).unwrap();
+    net.nodes[A].node.link.connect(0.0, "LA1AAA", "LA2BBB-1", &via(&digis)).unwrap();
     net.run_until(120.0, |n| n.both_connected());
     only_own_answered(&mut net, (true, 2), (false, 2));
 
     // A routed caller still connecting is not answered by direct Data either.
     let mut net = Net::new(39, 0.0, 0.0);
-    let link = &mut net.nodes[A].link;
+    let link = &mut net.nodes[A].node.link;
     link.connect(0.0, "LA1AAA", "LA2BBB-1", &via(&digis)).unwrap();
     let State::Connecting { session, .. } = &link.state else { panic!("not connecting") };
     let id = *session;
@@ -508,12 +494,12 @@ fn bursts_carry_the_route_field() {
                 }
             }
         };
-        net.nodes[A].link.connect(0.0, "LA1AAA", "LA2BBB-1", &via(digis)).unwrap();
+        net.nodes[A].node.link.connect(0.0, "LA1AAA", "LA2BBB-1", &via(digis)).unwrap();
         run(&mut net, &mut sent, &|n| n.both_connected());
-        net.nodes[A].link.send_data(b"hello");
-        net.nodes[b].link.send_data(b"there");
+        net.nodes[A].node.link.send_data(b"hello");
+        net.nodes[b].node.link.send_data(b"there");
         run(&mut net, &mut sent, &|n| n.nodes[A].host_rx.len() >= 5 && n.nodes[n.b()].host_rx.len() >= 5);
-        net.nodes[A].link.disconnect(net.now);
+        net.nodes[A].node.link.disconnect(net.now);
         run(&mut net, &mut sent, &|n| n.both_idle());
         for kind in [Kind::ConnectReq, Kind::ConnectAck, Kind::Data, Kind::Disc, Kind::DiscAck] {
             assert!(sent.iter().any(|&(_, k, _)| k == kind), "via {digis:?}: no {kind:?} sent");
@@ -529,11 +515,11 @@ fn bursts_carry_the_route_field() {
 fn digipeater_switched_off_drops_the_link_on_both_ends() {
     let mut net = Net::chain(32, 0.0, &["LA3DDD"], LinkConfig::default());
     let b = net.b();
-    net.nodes[A].link.connect(0.0, "LA1AAA", "LA2BBB-1", &via(&["LA3DDD"])).unwrap();
+    net.nodes[A].node.link.connect(0.0, "LA1AAA", "LA2BBB-1", &via(&["LA3DDD"])).unwrap();
     net.run_until(120.0, |n| n.both_connected());
     net.nodes[1].dead = true;
-    net.nodes[A].link.send_data(b"hello?");
-    net.nodes[b].link.send_data(b"anyone?");
+    net.nodes[A].node.link.send_data(b"hello?");
+    net.nodes[b].node.link.send_data(b"anyone?");
     net.run_until(600.0, |n| n.both_idle());
     assert!(net.has(A, &LinkEvent::Disconnected) && net.has(b, &LinkEvent::Disconnected));
 }
@@ -542,8 +528,8 @@ fn digipeater_switched_off_drops_the_link_on_both_ends() {
 fn connect_via_absent_digipeater_gives_up() {
     // The station between A and B is not a digipeater for LA9ZZZ.
     let mut net = Net::chain(33, 0.0, &["LA3DDD"], LinkConfig::default());
-    net.nodes[A].link.connect(0.0, "LA1AAA", "LA2BBB-1", &via(&["LA9ZZZ"])).unwrap();
-    let t = net.run_until(120.0, |n| n.nodes[A].link.is_idle());
+    net.nodes[A].node.link.connect(0.0, "LA1AAA", "LA2BBB-1", &via(&["LA9ZZZ"])).unwrap();
+    let t = net.run_until(120.0, |n| n.nodes[A].node.link.is_idle());
     assert!(t < 60.0, "took {t} s");
     assert_eq!(net.nodes[A].events, vec![LinkEvent::Disconnected]);
     assert!(net.nodes[net.b()].events.is_empty());
@@ -553,8 +539,8 @@ fn connect_via_absent_digipeater_gives_up() {
 fn more_than_two_digipeaters_is_refused() {
     let mut net = Net::new(34, 0.0, 0.0);
     for path in [&["LA3A", "LA3B", "LA3C"][..], &["LA3A", "LA3B", "LA3C", "LA3D"]] {
-        assert!(net.nodes[A].link.connect(0.0, "LA1AAA", "LA2BBB-1", &via(path)).is_err(), "via {path:?}");
-        assert!(net.nodes[A].link.is_idle());
+        assert!(net.nodes[A].node.link.connect(0.0, "LA1AAA", "LA2BBB-1", &via(path)).is_err(), "via {path:?}");
+        assert!(net.nodes[A].node.link.is_idle());
     }
     // Nor is a request through three answered.
     let mut b = Link::new(net.modem.clone(), LinkConfig::default(), 1);
@@ -597,7 +583,7 @@ fn slow_digipeater_needs_a_larger_hop_margin() {
     let digis = ["LA3DDD"];
     let cfg = LinkConfig { hop_margin_s: 2.0, ..LinkConfig::default() };
     let mut net = Net::chain(35, 0.0, &digis, cfg);
-    net.nodes[1].digi = Some(Digipeater::new(&["LA3DDD".to_string()], 1.0));
+    net.nodes[1].node.set_digipeater(Digipeater::new(&["LA3DDD".to_string()], 1.0));
     routed_session(net, &digis, 35);
 }
 
@@ -608,13 +594,13 @@ fn called_station_banner_does_not_collide_with_connect_ack_repeats() {
     for digis in [&["LA3DDD"][..], &["LA3DDD", "LA4EEE-2"]] {
         let mut net = Net::chain(36, 0.0, digis, LinkConfig::default());
         let b = net.b();
-        net.nodes[A].link.connect(0.0, "LA1AAA", "LA2BBB-1", &via(digis)).unwrap();
-        net.run_until(120.0, |n| n.nodes[n.b()].link.is_connected());
+        net.nodes[A].node.link.connect(0.0, "LA1AAA", "LA2BBB-1", &via(digis)).unwrap();
+        net.run_until(120.0, |n| n.nodes[n.b()].node.link.is_connected());
         let banner = data(500, 36);
-        net.nodes[b].link.send_data(&banner);
+        net.nodes[b].node.link.send_data(&banner);
         net.run_until(300.0, |n| n.nodes[A].host_rx.len() >= banner.len());
         assert_eq!(net.nodes[A].host_rx, banner);
-        let (ra, rb) = (net.nodes[A].link.stats.retries, net.nodes[b].link.stats.retries);
+        let (ra, rb) = (net.nodes[A].node.link.stats.retries, net.nodes[b].node.link.stats.retries);
         assert_eq!((ra, rb), (0, 0), "via {digis:?}: retries A {ra} B {rb}");
     }
 }
@@ -623,9 +609,9 @@ fn called_station_banner_does_not_collide_with_connect_ack_repeats() {
 fn path_naming_one_digipeater_twice() {
     let digis = ["LA3DDD"];
     let mut net = Net::chain(37, 0.0, &digis, LinkConfig::default());
-    net.nodes[A].link.connect(0.0, "LA1AAA", "LA2BBB-1", &via(&["LA3DDD", "LA3DDD"])).unwrap();
+    net.nodes[A].node.link.connect(0.0, "LA1AAA", "LA2BBB-1", &via(&["LA3DDD", "LA3DDD"])).unwrap();
     net.run_until(120.0, |n| n.both_connected());
-    net.nodes[A].link.send_data(b"twice");
+    net.nodes[A].node.link.send_data(b"twice");
     net.run_until(120.0, |n| n.nodes[n.b()].host_rx.len() >= 5);
     assert_eq!(net.nodes[net.b()].host_rx, b"twice");
 }
@@ -636,20 +622,20 @@ fn path_naming_one_digipeater_twice() {
 fn simultaneous_start(digis: &[&str], seed: u32, size: usize, offset: f64) -> Result<(f64, u64, u64), String> {
     let mut net = Net::chain(seed, 0.0, digis, LinkConfig::default());
     let b = net.b();
-    net.nodes[A].link.connect(0.0, "LA1AAA", "LA2BBB-1", &via(digis)).unwrap();
+    net.nodes[A].node.link.connect(0.0, "LA1AAA", "LA2BBB-1", &via(digis)).unwrap();
     net.run_until(120.0, |n| n.both_connected());
     let quiet = net.now + 25.0;
     net.run_until(30.0, |n| n.now >= quiet);
     let (da, db) = (data(size, seed), data(size, seed + 7));
-    net.nodes[A].link.send_data(&da);
+    net.nodes[A].node.link.send_data(&da);
     let at = net.now + offset;
     net.run_until(5.0, |n| n.now >= at);
-    net.nodes[b].link.send_data(&db);
+    net.nodes[b].node.link.send_data(&db);
     let lost = |n: &Net| n.has(A, &LinkEvent::Disconnected) || n.has(n.b(), &LinkEvent::Disconnected);
     let t = net.run_until(1500.0, |n| {
         lost(n) || n.nodes[A].host_rx.len() >= db.len() && n.nodes[n.b()].host_rx.len() >= da.len()
     });
-    let (ra, rb) = (net.nodes[A].link.stats.retries, net.nodes[b].link.stats.retries);
+    let (ra, rb) = (net.nodes[A].node.link.stats.retries, net.nodes[b].node.link.stats.retries);
     let what = format!("via {digis:?} seed {seed} {size} B offset {offset:.1} s");
     println!("{what}: {t:.0} s, retries {ra}/{rb}");
     if lost(&net) {
@@ -784,10 +770,10 @@ fn longer_resend_of_a_stored_segment_is_kept() {
     // codeword holds more bytes from the same offset. The receiver acknowledges the
     // resend, so the sender never sends those extra bytes again.
     let mut net = Net::new(50, 0.0, 0.0);
-    net.nodes[0].link.connect(0.0, "LA1AAA", "LA2BBB-1", &[]).unwrap();
+    net.nodes[0].node.link.connect(0.0, "LA1AAA", "LA2BBB-1", &[]).unwrap();
     net.run_until(60.0, |n| n.both_connected());
     let now = net.now;
-    let link = &mut net.nodes[1].link;
+    let link = &mut net.nodes[1].node.link;
     let State::Connected(s) = &link.state else { panic!("not connected") };
     let id = s.id;
     link.take_events();

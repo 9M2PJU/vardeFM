@@ -2,7 +2,7 @@
 //!
 //! See docs/PROTOCOL.md, "Host interface", for the full list and deviations from VARA.
 
-pub use vardefm_modem::MAX_DIGIS;
+use vardefm_modem::MAX_DIGIS;
 
 /// A parsed host command.
 #[derive(Clone, Debug, PartialEq, Eq)]

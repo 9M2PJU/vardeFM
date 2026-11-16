@@ -32,7 +32,9 @@
 //!   and wait longer for answers.
 
 mod digi;
+mod node;
 pub use digi::Digipeater;
+pub use node::Node;
 
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::Arc;

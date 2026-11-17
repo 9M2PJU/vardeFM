@@ -21,6 +21,7 @@ Project page, source code and issues: https://github.com/notepid/vardeFM
 | `docs/PROTOCOL.md` | Technical description of the waveform and protocol |
 | `99-vardefm-cm108.rules` | (Linux only) lets normal users key CM108/AIOC PTT |
 | `LICENSE-MIT`, `LICENSE-APACHE` | The two licenses; you may use VardeFM under either |
+| `THIRD-PARTY-LICENSES.html` | Licenses of the libraries built into the program |
 
 ## 1. Install
 

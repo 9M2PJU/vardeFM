@@ -83,7 +83,7 @@ jobs:
         run: |
           dir="vardefm_${{ inputs.version }}_${{ matrix.name }}"
           mkdir -p "dist/$dir/docs"
-          cp LICENSE "dist/$dir/"
+          cp LICENSE-MIT LICENSE-APACHE "dist/$dir/"
           cp packaging/README.md "dist/$dir/README.md"   # the user guide, not the developer README
           cp docs/*.md "dist/$dir/docs/"
           cd dist

@@ -572,7 +572,7 @@ fn offline_receive_matches_the_streaming_receiver() {
                 for (d, (name, f)) in DETECTORS.iter().enumerate() {
                     // Offline first: a detector that does not move forward on the whole
                     // recording fails there; one that stalls only on the receiver's
-                    // buffer fails in `Receiver::find_burst`.
+                    // buffer fails in `Receiver::step`.
                     let offline = receive(&m, *f, &rx, &sent, &mut cache).ok;
                     let mut receiver = Receiver::new(m.clone());
                     receiver.detect = *f;

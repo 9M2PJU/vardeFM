@@ -60,27 +60,16 @@ pub struct Receiver {
     detector: BusyDetector,
     /// The last good sample pushed.
     last: f32,
-    /// Test seam: the burst detector `step` searches with, so that the detector
-    /// evaluation can check its offline receiver against this one for every detector
-    /// it scores. Always `Ofdm::detect` outside tests.
-    #[cfg(test)]
+    /// The burst detector `step` searches with: always `Ofdm::detect` outside tests.
+    /// Tests replace it, so that the detector evaluation can check its offline receiver
+    /// against this one for every detector it scores.
     pub(crate) detect: DetectFn,
 }
 
 impl Receiver {
     pub fn new(modem: Arc<Modem>) -> Self {
         let detector = BusyDetector::new(&modem.ofdm.p);
-        Self {
-            modem,
-            buf: Vec::new(),
-            base: 0,
-            search: 0,
-            pending: None,
-            detector,
-            last: 0.0,
-            #[cfg(test)]
-            detect: OFDM_DETECT,
-        }
+        Self { modem, buf: Vec::new(), base: 0, search: 0, pending: None, detector, last: 0.0, detect: OFDM_DETECT }
     }
 
     /// Absolute index of the next sample to be pushed.
@@ -147,27 +136,6 @@ impl Receiver {
         AudioLevel::of(&self.buf[start.min(end)..end])
     }
 
-    /// Search the buffer from `search` for a burst. Only the detector differs under
-    /// test, where the `detect` field can replace it.
-    fn find_burst(&self) -> Option<usize> {
-        #[cfg(not(test))]
-        let f = OFDM_DETECT;
-        #[cfg(test)]
-        let f = self.detect;
-        let found = f(&self.modem, &self.buf, self.search);
-        // A replaced detector that does not move past `search` would make `step`
-        // search from the same place forever after a failed header: fail instead.
-        #[cfg(test)]
-        if let Some(b) = found {
-            assert!(
-                b > self.search,
-                "detector returned {b} when searching from {}: the receiver would loop",
-                self.search
-            );
-        }
-        found
-    }
-
     /// One processing step. Returns Some(true) if something changed and we should go again.
     fn step(&mut self, out: &mut Vec<RxBurst>) -> Option<bool> {
         let m = &self.modem;
@@ -199,7 +167,18 @@ impl Receiver {
         }
 
         let l = m.ofdm.p.symbol_len();
-        match self.find_burst() {
+        let found = (self.detect)(m, &self.buf, self.search);
+        // A replaced detector that does not move past `search` would make `step`
+        // search from the same place forever after a failed header: fail instead.
+        #[cfg(test)]
+        if let Some(b) = found {
+            assert!(
+                b > self.search,
+                "detector returned {b} when searching from {}: the receiver would loop",
+                self.search
+            );
+        }
+        match found {
             Some(b) => {
                 if self.buf.len() < self.needed(b, hdr_syms) {
                     // Come back when the header has arrived; re-detect from just before it.

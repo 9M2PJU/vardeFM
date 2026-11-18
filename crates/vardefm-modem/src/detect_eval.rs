@@ -357,7 +357,7 @@ fn noise_case(mode: &str, case: usize, seconds: f32, fs: f32) -> Vec<f32> {
         1 => transmit(&FmChannelConfig { cnr_db: Some(5.0), ..base }, &vec![0.0; n]),
         2 => {
             let mut rng = Prng::new(99);
-            (0..n).map(|_| (rng.next_u32() as f32 / u32::MAX as f32 - 0.5) * 0.6).collect()
+            (0..n).map(|_| 0.3 * rng.uniform()).collect()
         }
         3 => {
             let rate = fs as u64;

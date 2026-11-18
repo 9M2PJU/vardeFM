@@ -227,7 +227,7 @@ fn write_is_reported_even_when_the_buffer_length_is_unchanged() {
     // its write, so one must follow.
     let mut net = Net::new(9, 0.0, 0.0);
     net.nodes[A].node.link.connect(0.0, "LA1AAA", "LA2BBB-1", &[]).unwrap();
-    net.run_until(60.0, |n| n.nodes[A].node.link.is_connected() && n.nodes[1].node.link.is_connected());
+    net.run_until(60.0, Net::both_connected);
     let d = data(10, 9);
     net.nodes[A].node.link.send_data(&d);
     net.run_until(60.0, |n| n.nodes[1].host_rx.len() >= d.len());
@@ -246,7 +246,7 @@ fn write_is_reported_even_when_the_buffer_length_is_unchanged() {
 fn write_that_changes_the_buffer_length_is_reported_once() {
     let mut net = Net::new(9, 0.0, 0.0);
     net.nodes[A].node.link.connect(0.0, "LA1AAA", "LA2BBB-1", &[]).unwrap();
-    net.run_until(60.0, |n| n.nodes[A].node.link.is_connected() && n.nodes[1].node.link.is_connected());
+    net.run_until(60.0, Net::both_connected);
     let before = net.nodes[A].events.len();
     net.nodes[A].node.link.send_data(&data(10, 9));
     // No ack can come back within two ticks, so the length stays 10 throughout.

@@ -42,6 +42,8 @@ impl AudioLevel {
 }
 
 /// A burst detector: search `rx` from `from`, return where the body of preamble B starts.
+/// A position it returns must be more than `from`: the receiver searches on from a
+/// detection whose header fails, so one that returned `from` would search forever.
 pub(crate) type DetectFn = fn(&Modem, &[f32], usize) -> Option<usize>;
 
 /// The detector the receiver searches with.

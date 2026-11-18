@@ -122,21 +122,28 @@ struct Outcome {
 /// `offline_receive_matches_the_streaming_receiver` checks it against `Receiver`.
 /// `cache` holds the decodes of `rx` made so far.
 fn receive(m: &Modem, f: DetectFn, rx: &[f32], sent: &Burst, cache: &mut Decodes) -> Outcome {
-    let first = f(m, rx, 0);
+    let first = advance(m, f, rx, 0);
     let mut next = first;
     while let Some(b) = next {
         if let Some(ok) = decode_at(m, rx, b, sent, cache) {
             return Outcome { first, ok };
         }
-        // As `Receiver::step`: search on from the failed detection itself. That
-        // needs a detector that reports a position past the start of what it
-        // matched; one that returns `b` again would hang the evaluation, so stop.
-        next = f(m, rx, b);
-        if let Some(n) = next {
-            assert!(n > b, "detector returned {n} when searching from {b}: it would loop forever");
-        }
+        // As `Receiver::step`: search on from the failed detection itself.
+        next = advance(m, f, rx, b);
     }
     Outcome { first, ok: false }
+}
+
+/// `f` searching `rx` from `from`, which must return more than `from` ([`DetectFn`]):
+/// searching on from a detection that returned `from` again would hang the
+/// evaluation, so stop instead. The first search, from 0, is checked as well; a
+/// real detection is never at 0, because preamble B's body follows preamble A.
+fn advance(m: &Modem, f: DetectFn, rx: &[f32], from: usize) -> Option<usize> {
+    let next = f(m, rx, from);
+    if let Some(n) = next {
+        assert!(n > from, "detector returned {n} when searching from {from}: it would loop forever");
+    }
+    next
 }
 
 /// Outcome of one trial: (hit, burst) per detector, then the genie's burst.
@@ -382,16 +389,13 @@ fn noise_case(mode: &str, case: usize, seconds: f32, fs: f32) -> Vec<f32> {
 /// detection in the audio is counted.
 fn false_detections(m: &Modem, f: DetectFn, rx: &[f32]) -> (u32, u32) {
     let (mut dets, mut headers) = (0, 0);
-    let mut next = f(m, rx, 0);
+    let mut next = advance(m, f, rx, 0);
     while let Some(b) = next {
         dets += 1;
         if header_at(m, rx, b).is_some() {
             headers += 1;
         }
-        next = f(m, rx, b);
-        if let Some(n) = next {
-            assert!(n > b, "detector returned {n} when searching from {b}: it would loop forever");
-        }
+        next = advance(m, f, rx, b);
     }
     (dets, headers)
 }

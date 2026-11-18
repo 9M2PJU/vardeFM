@@ -220,6 +220,42 @@ impl Net {
     }
 }
 
+#[test]
+fn write_is_reported_even_when_the_buffer_length_is_unchanged() {
+    // A write that lands in the same tick as the ack draining an equal amount leaves
+    // the buffer length as last reported. The host still needs a report newer than
+    // its write, so one must follow.
+    let mut net = Net::new(9, 0.0, 0.0);
+    net.nodes[A].node.link.connect(0.0, "LA1AAA", "LA2BBB-1", &[]).unwrap();
+    net.run_until(60.0, Net::both_connected);
+    let d = data(10, 9);
+    net.nodes[A].node.link.send_data(&d);
+    net.run_until(60.0, |n| n.nodes[1].host_rx.len() >= d.len());
+    assert_eq!(net.nodes[A].events.last(), Some(&LinkEvent::Buffer(10)));
+    // Stop one tick before B's ack reaches A, then write as much again.
+    net.run_until(60.0, |n| n.air.iter().any(|a| a.1 == A && a.0 <= n.now + DT));
+    let before = net.nodes[A].events.len();
+    net.nodes[A].node.link.send_data(&d);
+    net.step();
+    let reports: Vec<_> = net.nodes[A].events[before..].iter().filter(|e| matches!(e, LinkEvent::Buffer(_))).collect();
+    // Buffer(20) would mean the ack missed this tick (the setup drifted), not a bug.
+    assert_eq!(reports, [&LinkEvent::Buffer(10)], "none = write went unreported; Buffer(20) = ack not in this tick");
+}
+
+#[test]
+fn write_that_changes_the_buffer_length_is_reported_once() {
+    let mut net = Net::new(9, 0.0, 0.0);
+    net.nodes[A].node.link.connect(0.0, "LA1AAA", "LA2BBB-1", &[]).unwrap();
+    net.run_until(60.0, Net::both_connected);
+    let before = net.nodes[A].events.len();
+    net.nodes[A].node.link.send_data(&data(10, 9));
+    // No ack can come back within two ticks, so the length stays 10 throughout.
+    net.step();
+    net.step();
+    let reports: Vec<_> = net.nodes[A].events[before..].iter().filter(|e| matches!(e, LinkEvent::Buffer(_))).collect();
+    assert_eq!(reports, [&LinkEvent::Buffer(10)]);
+}
+
 fn data(n: usize, seed: u32) -> Vec<u8> {
     // Every byte value, including CR and 0x00, in pseudo-random order.
     let mut rng = Prng::new(seed);
@@ -548,7 +584,9 @@ fn more_than_two_digipeaters_is_refused() {
         assert!(net.nodes[A].node.link.connect(0.0, "LA1AAA", "LA2BBB-1", &via(path)).is_err(), "via {path:?}");
         assert!(net.nodes[A].node.link.is_idle());
     }
-    // Nor is a request through three answered.
+    // Nor is a request through three answered. The header's hop field tops out at
+    // MAX_DIGIS, so such a request never looks fully repeated and is refused even without
+    // the payload's digipeater-count check (that limit is tested in connect_payload_parsing).
     let mut b = Link::new(net.modem.clone(), LinkConfig::default(), 1);
     b.set_mycalls(vec!["LA2BBB-1".into()]);
     b.set_listen(true);

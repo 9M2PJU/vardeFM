@@ -80,7 +80,7 @@ const OFFSET_MOD: u64 = 1 << 24;
 /// holds at most 242 bytes). The receiver treats it as a failed codeword.
 const VOID_LEN: u8 = 0xff;
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct LinkConfig {
     /// Gap between receiving a burst and answering it.
     pub turnaround_s: f64,
@@ -339,7 +339,10 @@ impl Link {
             State::Connected(s) => s.tx_buf.len(),
             _ => 0,
         };
-        if buf != self.last_buffer || std::mem::take(&mut self.force_buffer) {
+        // Take the flag first: behind `||` it would stay set when the length changed,
+        // and the next call would send a second report with nothing new.
+        let forced = std::mem::take(&mut self.force_buffer);
+        if buf != self.last_buffer || forced {
             self.last_buffer = buf;
             self.events.push(LinkEvent::Buffer(buf));
         }

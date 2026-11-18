@@ -6,6 +6,11 @@ run the same minor version.
 
 ## [Unreleased]
 
+### Changed
+- **License.** VardeFM is now dual licensed under MIT OR Apache-2.0, at your option, so it
+  can be embedded as a library in any application, including closed-source ones (#19). Releases up to and including
+  0.3.2 remain available under GPL-3.0-or-later.
+
 ## [0.3.2] - 2026-11-16
 
 On-air compatible with 0.3.0 and 0.3.1 for direct sessions. Digipeating is new and

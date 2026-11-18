@@ -151,7 +151,7 @@ vardefm modem --audio-in "USB" --audio-out "USB" --ptt vox --digi LA3DDD-9
 ```
 
 It needs no host program, and it can still carry its own sessions on the same port.
-While it repeats a busy session, though, its own session is slow.
+While it repeats a busy session, though, its own session is slow and may be dropped.
 A host then connects with `CONNECT <mycall> <target> VIA LA3DDD-9` (up to two
 digipeaters, in order). The digipeater prints an `rpt` line for each burst it repeats.
 

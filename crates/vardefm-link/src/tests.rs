@@ -242,6 +242,20 @@ fn write_is_reported_even_when_the_buffer_length_is_unchanged() {
     assert_eq!(reports, [&LinkEvent::Buffer(10)], "none = write went unreported; Buffer(20) = ack not in this tick");
 }
 
+#[test]
+fn write_that_changes_the_buffer_length_is_reported_once() {
+    let mut net = Net::new(9, 0.0, 0.0);
+    net.nodes[A].node.link.connect(0.0, "LA1AAA", "LA2BBB-1", &[]).unwrap();
+    net.run_until(60.0, |n| n.nodes[A].node.link.is_connected() && n.nodes[1].node.link.is_connected());
+    let before = net.nodes[A].events.len();
+    net.nodes[A].node.link.send_data(&data(10, 9));
+    // No ack can come back within two ticks, so the length stays 10 throughout.
+    net.step();
+    net.step();
+    let reports: Vec<_> = net.nodes[A].events[before..].iter().filter(|e| matches!(e, LinkEvent::Buffer(_))).collect();
+    assert_eq!(reports, [&LinkEvent::Buffer(10)]);
+}
+
 fn data(n: usize, seed: u32) -> Vec<u8> {
     // Every byte value, including CR and 0x00, in pseudo-random order.
     let mut rng = Prng::new(seed);

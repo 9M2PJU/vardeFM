@@ -338,7 +338,10 @@ impl Link {
             State::Connected(s) => s.tx_buf.len(),
             _ => 0,
         };
-        if buf != self.last_buffer || std::mem::take(&mut self.force_buffer) {
+        // Take the flag first: behind `||` it would stay set when the length changed,
+        // and the next call would send a second report with nothing new.
+        let forced = std::mem::take(&mut self.force_buffer);
+        if buf != self.last_buffer || forced {
             self.last_buffer = buf;
             self.events.push(LinkEvent::Buffer(buf));
         }

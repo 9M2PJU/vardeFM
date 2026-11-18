@@ -30,6 +30,25 @@ const TX_LOWPASS_FACTOR: f32 = 1.15;
 /// Clip-and-filter passes before the final clamp.
 const CLIP_FILTER_PASSES: usize = 2;
 
+/// One OFDM symbol (cyclic prefix + body) from carrier values, with the TX tilt `gains`.
+fn symbol_time(p: &OfdmParams, gains: &[f32], ifft: &dyn Fft<f32>, carriers: &[Complex32]) -> Vec<f32> {
+    let n = p.nfft;
+    let mut x = vec![Complex32::new(0.0, 0.0); n];
+    for (k, &v) in carriers.iter().enumerate() {
+        let bin = p.first_bin + k;
+        let v = v * gains[k];
+        x[bin] = v;
+        x[n - bin] = v.conj();
+    }
+    ifft.process(&mut x);
+    let scale = 1.0 / (n as f32).sqrt();
+    let body: Vec<f32> = x.iter().map(|c| c.re * scale).collect();
+    let mut out = Vec::with_capacity(p.symbol_len());
+    out.extend_from_slice(&body[n - p.ncp..]);
+    out.extend_from_slice(&body);
+    out
+}
+
 pub struct Ofdm {
     pub p: OfdmParams,
     fft: Arc<dyn Fft<f32>>,
@@ -76,7 +95,7 @@ impl Ofdm {
         let pilot_table = (0..PILOT_TABLE_LEN).map(|_| pilot_idx.iter().map(|_| rng.bpsk()).collect()).collect();
 
         let f0 = p.carrier_freq(0);
-        let gains = (0..nc)
+        let gains: Vec<f32> = (0..nc)
             .map(|k| {
                 let octaves = (p.carrier_freq(k) / f0).log2();
                 10f32.powf(p.tilt_db_per_octave * octaves / 20.0)
@@ -84,7 +103,7 @@ impl Ofdm {
             .collect();
 
         let mut rng = Prng::new(0x5eed_00a1);
-        let pre_a = (0..nc)
+        let pre_a: Vec<Complex32> = (0..nc)
             .map(|k| {
                 let v = rng.bpsk();
                 if (p.first_bin + k).is_multiple_of(2) {
@@ -95,16 +114,18 @@ impl Ofdm {
             })
             .collect();
         let mut rng = Prng::new(0x5eed_00b2);
-        let pre_b = (0..nc).map(|_| Complex32::new(rng.bpsk(), 0.0)).collect();
+        let pre_b: Vec<Complex32> = (0..nc).map(|_| Complex32::new(rng.bpsk(), 0.0)).collect();
 
-        let mut s =
-            Self { p, fft, ifft, pilot_idx, data_idx, pilot_table, gains, pre_a, pre_b, pre_b_body: Vec::new() };
-        let b = s.symbol_time(&s.pre_b);
-        let mut body = b[s.p.ncp..].to_vec();
-        let e = body.iter().map(|x| x * x).sum::<f32>().sqrt();
-        body.iter_mut().for_each(|x| *x /= e);
-        s.pre_b_body = body;
-        s
+        let sym_b = symbol_time(&p, &gains, ifft.as_ref(), &pre_b);
+        let mut pre_b_body = sym_b[p.ncp..].to_vec();
+        let e = pre_b_body.iter().map(|x| x * x).sum::<f32>().sqrt();
+        pre_b_body.iter_mut().for_each(|x| *x /= e);
+        Self { p, fft, ifft, pilot_idx, data_idx, pilot_table, gains, pre_a, pre_b, pre_b_body }
+    }
+
+    /// Leader symbols sent for a leader of at least `leader_s` seconds.
+    pub fn leader_symbols(&self, leader_s: f32) -> usize {
+        (leader_s / self.p.symbol_duration()).ceil() as usize
     }
 
     pub fn data_carriers(&self) -> usize {
@@ -122,21 +143,7 @@ impl Ofdm {
 
     /// One OFDM symbol (cyclic prefix + body) from carrier values.
     fn symbol_time(&self, carriers: &[Complex32]) -> Vec<f32> {
-        let n = self.p.nfft;
-        let mut x = vec![Complex32::new(0.0, 0.0); n];
-        for (k, &v) in carriers.iter().enumerate() {
-            let bin = self.p.first_bin + k;
-            let v = v * self.gains[k];
-            x[bin] = v;
-            x[n - bin] = v.conj();
-        }
-        self.ifft.process(&mut x);
-        let scale = 1.0 / (n as f32).sqrt();
-        let body: Vec<f32> = x.iter().map(|c| c.re * scale).collect();
-        let mut out = Vec::with_capacity(self.p.symbol_len());
-        out.extend_from_slice(&body[n - self.p.ncp..]);
-        out.extend_from_slice(&body);
-        out
+        symbol_time(&self.p, &self.gains, self.ifft.as_ref(), carriers)
     }
 
     /// Build a frame. Each entry of `data` holds `data_carriers()` symbols.
@@ -191,7 +198,7 @@ impl Ofdm {
     /// Unscaled samples of a frame with its leader.
     fn frame_samples(&self, data: &[Vec<Complex32>], leader_s: f32) -> Vec<f32> {
         let nc = self.p.num_carriers;
-        let n_leader = (leader_s / self.p.symbol_duration()).ceil() as usize;
+        let n_leader = self.leader_symbols(leader_s);
         let mut out = Vec::with_capacity(self.frame_len(data.len()) + n_leader * self.p.symbol_len());
         let mut rng = Prng::new(0x5eed_00c3);
         for _ in 0..n_leader {

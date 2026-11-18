@@ -121,7 +121,7 @@ fn survives_16bit_wav_roundtrip() {
 fn no_frames_found_in_non_modem_audio() {
     let n = FS as usize * 2;
     let mut rng = vardefm_dsp::prng::Prng::new(99);
-    let noise: Vec<f32> = (0..n).map(|_| (rng.next_u32() as f32 / u32::MAX as f32 - 0.5) * 0.6).collect();
+    let noise: Vec<f32> = (0..n).map(|_| 0.3 * rng.uniform()).collect();
     let tone = |f: f32| (0..n).map(|i| 0.3 * (2.0 * PI * f * i as f32 / FS as f32).sin()).collect::<Vec<f32>>();
     let cases: Vec<(&str, Vec<f32>)> = vec![
         ("silence", vec![0.0; n]),

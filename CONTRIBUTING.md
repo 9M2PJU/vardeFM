@@ -93,10 +93,15 @@ the answer. "The agent wrote it" does not answer a review question.
 Keep the agent's work in scope. Leave out refactors, renames and formatting changes that
 the PR does not need.
 
-Say in the PR description whether an agent wrote the code and which model reviewed it.
+Say in the PR description whether an agent wrote the code and which model reviewed it, if
+any.
 This does not decide whether the PR is accepted. It tells the reviewer how to read it.
 
 ## Review your own PR first
+
+We encourage you to run an AI code review on your PR before you ask for a human review.
+It is not required, and a small fix rarely needs one. On larger changes it finds real bugs
+and saves a round of review.
 
 1. Open the PR as a **draft**.
 2. Run an AI code review over the full diff, for example `/code-review` in Claude Code or
@@ -110,9 +115,12 @@ GitHub fills it in when you open a PR on the website. A PR opened with a ready-m
 description, for example with `gh pr create --body` or by an agent, does not get it
 automatically, so use the same sections and checklist there.
 
-Please use a top-tier model for the review: Claude Opus, or an equivalent model from
-another vendor. Smaller models miss the timing and protocol bugs that matter most in a
-modem.
+If you run a review, use a top-tier model if you can: Claude Opus, or an equivalent model
+from another vendor. Smaller models miss the timing and protocol bugs that matter most in
+a modem.
+
+If you did not run one, say so in the PR. That is fine, and it tells the reviewer where
+to look harder.
 
 ## What to expect from review
 

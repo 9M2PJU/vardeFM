@@ -192,7 +192,7 @@ fn survives_a_click() {
     let a = 3.0 * rms * 3f32.sqrt();
     let mut rng = Prng::new(77);
     for x in &mut audio[from..from + l] {
-        *x = a * (rng.next_u32() as f32 / u32::MAX as f32 * 2.0 - 1.0);
+        *x = a * rng.uniform();
     }
 
     let known = m.header_carriers(&b.header);
@@ -277,7 +277,7 @@ fn survives_a_click_in_the_header() {
     let mut audio = clean.clone();
     let mut rng = Prng::new(78);
     for x in &mut audio[from..from + l] {
-        *x = a * (rng.next_u32() as f32 / u32::MAX as f32 * 2.0 - 1.0);
+        *x = a * rng.uniform();
     }
 
     let known = m.header_carriers(&b.header);

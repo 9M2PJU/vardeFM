@@ -192,9 +192,22 @@ fn trial(m: &Modem, mode: &str, cnr: f32, level: u8, ncw: usize, truth: usize, t
 /// The channel's delays depend neither on its noise nor on the payload (the burst
 /// layout is fixed by level and size), so one noiseless copy gives it for every trial.
 pub(crate) fn true_position(m: &Modem, mode: &str, level: u8, ncw: usize) -> usize {
+    clean_position(m, &clean_copy(m, mode, level, ncw, 0).1)
+}
+
+/// The true position in `rx`, a noiseless copy from [`clean_copy`]: where the
+/// reference detector finds preamble B.
+fn clean_position(m: &Modem, rx: &[f32]) -> usize {
+    m.ofdm.detect(rx, 0).expect("burst not found on a clean channel")
+}
+
+/// The `level` burst of `ncw` codewords with payload `t` as modulated, and as a
+/// noiseless `mode` channel delivers it.
+fn clean_copy(m: &Modem, mode: &str, level: u8, ncw: usize, t: u32) -> (Vec<f32>, Vec<f32>) {
     let clean = FmChannelConfig { cnr_db: None, ..FmChannelConfig::by_name(mode).unwrap() };
-    let tx = m.modulate(&burst(level, ncw, payload_seed(0)));
-    m.ofdm.detect(&transmit(&clean, &tx), 0).expect("burst not found on a clean channel")
+    let tx = m.modulate(&burst(level, ncw, payload_seed(t)));
+    let rx = transmit(&clean, &tx);
+    (tx, rx)
 }
 
 /// Where the true position lies against the channel, from one noiseless copy: (the
@@ -209,12 +222,11 @@ pub(crate) fn true_position(m: &Modem, mode: &str, level: u8, ncw: usize) -> usi
 /// not invert the audio. A delay of 0 or a whole cyclic prefix is the edge of the
 /// search, not a peak.
 fn position_check(m: &Modem, mode: &str, level: u8, ncw: usize) -> (usize, i64, usize) {
-    let clean = FmChannelConfig { cnr_db: None, ..FmChannelConfig::by_name(mode).unwrap() };
+    let cfg = FmChannelConfig::by_name(mode).unwrap();
     let p = &m.ofdm.p;
-    let tx = m.modulate(&burst(level, ncw, payload_seed(0)));
-    let rx = transmit(&clean, &tx);
-    let truth = m.ofdm.detect(&rx, 0).expect("burst not found on a clean channel");
-    let lead = (clean.lead_silence_s * clean.fs) as usize;
+    let (tx, rx) = clean_copy(m, mode, level, ncw, 0);
+    let truth = clean_position(m, &rx);
+    let lead = (cfg.lead_silence_s * cfg.fs) as usize;
     let data = m.header_symbols() + ncw * m.symbols_per_codeword(level);
     let boundary = lead + tx.len() - data * p.symbol_len() - p.nfft;
     let rx = &rx[lead..];
@@ -500,16 +512,15 @@ fn on_every_core_keeps_trial_order() {
 fn harness_sees_strong_bursts_and_no_false_headers() {
     for mode in ["narrow", "wide"] {
         let m = modem(mode);
+        let (truth, after, delay) = position_check(&m, mode, 1, 1);
         // The true position must not depend on the payload, or one copy could not give it.
-        let truth = true_position(&m, mode, 1, 1);
-        let clean = FmChannelConfig { cnr_db: None, ..FmChannelConfig::by_name(mode).unwrap() };
+        // `position_check` finds it as `true_position` does: `clean_position` on payload 0.
         for t in 1..4 {
-            let tx = m.modulate(&burst(1, 1, payload_seed(t)));
-            assert_eq!(m.ofdm.detect(&transmit(&clean, &tx), 0), Some(truth), "{mode}: payload {t} moves the burst");
+            let pos = clean_position(&m, &clean_copy(&m, mode, 1, 1, t).1);
+            assert_eq!(pos, truth, "{mode}: payload {t} moves the burst");
         }
         // The printed cross-check must stay meaningful: the true position lies within a
         // cyclic prefix of the sent boundary plus the channel delay.
-        let (_, after, delay) = position_check(&m, mode, 1, 1);
         let ncp = m.ofdm.p.ncp as i64;
         assert!(delay > 0 && (delay as i64) < ncp, "{mode}: channel delay {delay} is the edge of the 0..={ncp} search");
         assert!(

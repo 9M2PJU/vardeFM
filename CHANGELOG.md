@@ -67,6 +67,11 @@ end stations and the digipeaters of a routed session should all run 0.3.2.
   at a faster level, the receiver acknowledged the longer copy but kept the shorter one,
   so the sender never sent the difference again. Only the receiving side changes: a
   station with this fix receives correctly from any version. (#29, thanks @mustig)
+- Two stations talking directly could drop their session when both started a burst at
+  the same moment. Both then retried after the same wait, within 0.4 s of each other,
+  and a retry did not give way to a busy channel, so every retry collided. A retry now
+  gives way, as it already did through digipeaters, and answers the other end's burst
+  instead. In the simulator this dropped 1 run in 4 with both ends sending at once.
 
 ## [0.3.1] - 2026-11-09
 
